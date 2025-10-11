@@ -1,0 +1,24 @@
+# ════════════════════════════════════════════════════════════════════
+# Trump Truth Social Market Impact Analyzer
+# ════════════════════════════════════════════════════════════════════
+# Python Dependencies
+# ════════════════════════════════════════════════════════════════════
+
+# Core Dependencies
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+pymongo>=4.6.0
+colorama>=0.4.6
+
+# LLM Integration (Ollama API)
+# Ollama itself runs as separate service (see docker-compose.yaml)
+# We only need requests to communicate with Ollama API
+
+# Optional: For future spaCy NER training
+# spacy>=3.7.0
+# spacy-transformers>=1.3.0
+
+# Development Dependencies (optional)
+# pytest>=7.4.0
+# black>=23.0.0
+# flake8>=6.0.0
