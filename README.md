@@ -1,164 +1,326 @@
-# 🤖 Trump Truth Social Market Impact Analyzer# 🤖 Trump Truth Social Market Impact Analyzer
+# Trump Truth Social Market Analyzer# 🤖 Trump Truth Social Market Impact Analyzer# 🤖 Trump Truth Social Market Impact Analyzer
 
 
 
-AI-powered system that monitors Donald Trump's Truth Social posts and analyzes their potential market impact using **Qwen3:8b LLM** with intelligent quality checks.AI-powered system that monitors Donald Trump's Truth Social posts and analyzes their potential market impact using **Qwen3:8b LLM** with intelligent quality checks.
+Real-time market impact analysis of Trump's Truth Social posts using AI.
 
 
 
-![Python](https://img.shields.io/badge/Python-3.13-blue)![Python](https://img.shields.io/badge/Python-3.13-blue)
+## FeaturesAI-powered system that monitors Donald Trump's Truth Social posts and analyzes their potential market impact using **Qwen3:8b LLM** with intelligent quality checks.AI-powered system that monitors Donald Trump's Truth Social posts and analyzes their potential market impact using **Qwen3:8b LLM** with intelligent quality checks.
 
-![Qwen3](https://img.shields.io/badge/LLM-Qwen3--8B-green)![Qwen3](https://img.shields.io/badge/LLM-Qwen3--8B-green)
+
+
+- **221+ weighted keywords** for trade, geopolitics, crypto, and markets
+
+- **LLM analysis** with Llama 3.2 3B (CPU-optimized, 2GB)
+
+- **Quality checks** to prevent bad analysis from reaching Discord![Python](https://img.shields.io/badge/Python-3.13-blue)![Python](https://img.shields.io/badge/Python-3.13-blue)
+
+- **Market direction predictions** (stocks, crypto, forex, commodities)
+
+- **Discord alerts** with German timestamps![Qwen3](https://img.shields.io/badge/LLM-Qwen3--8B-green)![Qwen3](https://img.shields.io/badge/LLM-Qwen3--8B-green)
+
+- **Training data collection** for future spaCy NER model
 
 ![Docker](https://img.shields.io/badge/Docker-Compose-blue)![Docker](https://img.shields.io/badge/Docker-Compose-blue)
 
+## Quick Start
+
 ![License](https://img.shields.io/badge/License-MIT-yellow)![License](https://img.shields.io/badge/License-MIT-yellow)
 
+```bash
+
+# Clone
+
+git clone git@github.com:Muslix/social-media-analyzer.git
+
+cd social-media-analyzer------
 
 
-------
 
+# Install dependencies
 
+pip install -r requirements.txt
 
 ## 🎯 Features## 🎯 Features
 
+# Install Ollama + Llama 3.2 3B
 
+curl https://ollama.ai/install.sh | sh
+
+ollama pull llama3.2:3b
 
 ### 🔍 **Multi-Layer Analysis Pipeline**### 🔍 **Multi-Layer Analysis Pipeline**
 
-1. **Keyword Analysis** (221+ weighted keywords)1. **Keyword Analysis** (221+ weighted keywords)
+# Start services
 
-   - Trade policy, tariffs, sanctions   - Trade policy, tariffs, sanctions
-
-   - Monetary policy, Fed actions   - Monetary policy, Fed actions
-
-   - Cryptocurrency regulations   - Cryptocurrency regulations
-
-   - Geopolitics, military conflicts   - Geopolitics, military conflicts
-
-   - Energy markets, commodities   - Energy markets, commodities
+docker compose up -d1. **Keyword Analysis** (221+ weighted keywords)1. **Keyword Analysis** (221+ weighted keywords)
 
 
 
-2. **LLM Analysis** (Qwen3:8b - 5.2GB model)2. **LLM Analysis** (Qwen3:8b - 5.2GB model)
+# Configure   - Trade policy, tariffs, sanctions   - Trade policy, tariffs, sanctions
 
-   - Semantic understanding of market impact   - Semantic understanding of market impact
+cp .env.example .env
 
-   - Score calibration (0-100)   - Score calibration (0-100)
+# Edit .env with your settings   - Monetary policy, Fed actions   - Monetary policy, Fed actions
 
-   - Urgency classification (immediate/hours/days)   - Urgency classification (immediate/hours/days)
+
+
+# Run   - Cryptocurrency regulations   - Cryptocurrency regulations
+
+python main.py
+
+```   - Geopolitics, military conflicts   - Geopolitics, military conflicts
+
+
+
+## Configuration   - Energy markets, commodities   - Energy markets, commodities
+
+
+
+Create `.env` file:
+
+
+
+```env2. **LLM Analysis** (Qwen3:8b - 5.2GB model)2. **LLM Analysis** (Qwen3:8b - 5.2GB model)
+
+# Truth Social
+
+TRUTH_USERNAME=realDonaldTrump   - Semantic understanding of market impact   - Semantic understanding of market impact
+
+
+
+# Ollama (CPU-optimized)   - Score calibration (0-100)   - Score calibration (0-100)
+
+OLLAMA_MODEL=llama3.2:3b
+
+OLLAMA_URL=http://localhost:11434   - Urgency classification (immediate/hours/days)   - Urgency classification (immediate/hours/days)
+
+OLLAMA_NUM_THREADS=8  # Run 'nproc' to check CPU cores, then set this to that number (not $(nproc)!)
 
    - Market direction predictions (stocks/crypto/forex/commodities)   - Market direction predictions (stocks/crypto/forex/commodities)
 
-   - Professional reasoning generation
+# Discord (optional)
+
+DISCORD_NOTIFY=true   - Professional reasoning generation
+
+DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/YOUR_WEBHOOK
 
    - Professional reasoning generation### 🔍 **Multi-Layer Analysis Pipeline**
 
-3. **Quality Check** (Automated validation)
+# Thresholds
+
+LLM_THRESHOLD=20       # Min keyword score for LLM analysis3. **Quality Check** (Automated validation)
+
+DISCORD_THRESHOLD=25   # Min LLM score for Discord alerts
 
    - Validates analysis quality
 
-   - Detects internal jargon
+# Quality Check
+
+QUALITY_CHECK_ENABLED=true   - Detects internal jargon
+
+```
 
    - Suggests improvements3. **Quality Check** (Automated validation)1. **Keyword Analysis** (221+ weighted keywords)- **Multi-Layer Analysis**:- Forwards posts to Discord via webhooks
 
+## CPU Optimization
+
    - Ensures professional output
+
+For best CPU performance:
 
    - Validates analysis quality
 
-### 📊 **Real-time Discord Alerts**
+```bash
 
-- Rich embeds with market analysis   - Detects internal jargon   - Trade policy, tariffs, sanctions
+# Use all CPU cores### 📊 **Real-time Discord Alerts**
 
-- German time formatting (CET/CEST)
+export OLLAMA_NUM_THREADS=$(nproc)
 
-- Color-coded urgency levels   - Suggests improvements
-
-- Market direction indicators
-
-- Direct links to original posts   - Ensures professional output   - Monetary policy, Fed actions  - 🔍 **Keyword Analysis**: 221+ weighted keywords across critical, high, and medium impact categories- Stores processed posts in MongoDB to avoid duplicates
+ollama serve- Rich embeds with market analysis   - Detects internal jargon   - Trade policy, tariffs, sanctions
 
 
 
-### 💾 **Training Data Collection**
+# Or set in .env- German time formatting (CET/CEST)
+
+OLLAMA_NUM_THREADS=8
+
+```- Color-coded urgency levels   - Suggests improvements
+
+
+
+## How It Works- Market direction indicators
+
+
+
+1. **Monitor** Truth Social for new posts (@realDonaldTrump)- Direct links to original posts   - Ensures professional output   - Monetary policy, Fed actions  - 🔍 **Keyword Analysis**: 221+ weighted keywords across critical, high, and medium impact categories- Stores processed posts in MongoDB to avoid duplicates
+
+2. **Keyword Filter** analyzes with 221+ weighted keywords
+
+3. **LLM Analysis** (if keyword score ≥ 20) using Llama 3.2 3B
+
+4. **Quality Check** validates analysis before Discord
+
+5. **Discord Alert** (if LLM score ≥ 25) with market predictions### 💾 **Training Data Collection**
+
+6. **Training Data** saved to `training_data/llm_training_data.jsonl`
 
 - Saves all analyses to JSONL format
 
+## Model Performance
+
 - Includes quality check results### 📊 **Real-time Discord Alerts**   - Cryptocurrency regulations
 
-- Ready for future spaCy NER training
+| Model | Size | Speed (GPU) | Speed (CPU) | Quality |
 
-- Tracks model performance- Rich embeds with market analysis
+|-------|------|-------------|-------------|---------|- Ready for future spaCy NER training
 
+| **Llama 3.2 3B** | 2GB | 4-5s | 15-30s | 90/100 |
 
-
----- German time formatting (CET/CEST)   - Geopolitics, military conflicts  - 🤖 **LLM Analysis**: Ollama GPT-OSS:20B for intelligent semantic analysis (coming soon)- Supports media attachments (images, videos, GIFs)
-
-
-
-## 🏗️ Architecture- Color-coded urgency levels
+| Qwen3 8B | 5.2GB | 5-6s | 60-120s | 95/100 |- Tracks model performance- Rich embeds with market analysis
 
 
+
+**Recommendation**: Use Llama 3.2 3B for CPU servers (2-4x faster).
+
+
+
+## Development---- German time formatting (CET/CEST)   - Geopolitics, military conflicts  - 🤖 **LLM Analysis**: Ollama GPT-OSS:20B for intelligent semantic analysis (coming soon)- Supports media attachments (images, videos, GIFs)
+
+
+
+```bash
+
+# Test LLM models
+
+python test_llama32.py## 🏗️ Architecture- Color-coded urgency levels
+
+
+
+# Run quality check tests
+
+make test-quality-check
 
 ```- Market direction indicators   - Energy markets, commodities
 
-┌─────────────────┐
+# Clear database
 
-│  Truth Social   │- Direct links to original posts
+make clean-db┌─────────────────┐
 
-│   (via API)     │
 
-└────────┬────────┘  - 🧠 **NER Model**: Custom spaCy model trained on market-specific entities (coming soon)- Rate limiting for Discord notifications
 
-         │
+# Full reset│  Truth Social   │- Direct links to original posts
 
-         ▼### 💾 **Training Data Collection**
+make full-reset
 
-┌─────────────────┐
+```│   (via API)     │
 
-│  FlareSolverr   │ ← Cloudflare bypass- Saves all analyses to JSONL format2. **LLM Analysis** (Qwen3:8b - 5.2GB model)
 
-│  (Docker)       │
 
-└────────┬────────┘- Includes quality check results
+## Project Structure└────────┬────────┘  - 🧠 **NER Model**: Custom spaCy model trained on market-specific entities (coming soon)- Rate limiting for Discord notifications
 
-         │
 
-         ▼- Ready for future spaCy NER training   - Semantic understanding of market impact- **Smart Filtering**: Whole-word matching to avoid false positives- Automatic retries for failed requests
 
-┌─────────────────┐
+```         │
 
-│ Keyword Filter  │ ← 221+ keywords- Tracks model performance
+src/
 
-│  (Score 0-100)  │
+├── analyzers/         ▼### 💾 **Training Data Collection**
 
-└────────┬────────┘   - Score calibration (0-100)
+│   ├── market_analyzer.py   # Keyword analysis
 
-         │
+│   └── llm_analyzer.py      # LLM integration┌─────────────────┐
 
-         ▼ (if score ≥ 20)---
+├── data/
 
-┌─────────────────┐
+│   └── keywords.py          # 221+ keywords│  FlareSolverr   │ ← Cloudflare bypass- Saves all analyses to JSONL format2. **LLM Analysis** (Qwen3:8b - 5.2GB model)
 
-│  Qwen3:8b LLM   │ ← Semantic analysis   - Urgency classification (immediate/hours/days)- **Impact Scoring**: Comprehensive scoring system with critical trigger detection- Comprehensive error handling and logging
+└── output/
 
-│  (Ollama)       │
+    ├── formatter.py         # Output formatting│  (Docker)       │
 
-└────────┬────────┘## 🏗️ Architecture
+    └── discord_notifier.py  # Discord webhooks
 
-         │
+prompts/└────────┬────────┘- Includes quality check results
+
+├── market_analysis_prompt.py
+
+└── quality_check_prompt.py         │
+
+tests/
+
+training_data/              # JSONL training data         ▼- Ready for future spaCy NER training   - Semantic understanding of market impact- **Smart Filtering**: Whole-word matching to avoid false positives- Automatic retries for failed requests
+
+output/                     # Analysis logs
+
+```┌─────────────────┐
+
+
+
+## Example Output│ Keyword Filter  │ ← 221+ keywords- Tracks model performance
+
+
+
+```│  (Score 0-100)  │
+
+🚨 MARKET ANALYSIS: Score 90/100
+
+Urgency: immediate└────────┬────────┘   - Score calibration (0-100)
+
+
+
+Market Direction:         │
+
+  Stocks:      bearish
+
+  Crypto:      bearish           ▼ (if score ≥ 20)---
+
+  Forex:       usd_up
+
+  Commodities: neutral┌─────────────────┐
+
+
+
+Reasoning: 100% tariff on China will trigger immediate │  Qwen3:8b LLM   │ ← Semantic analysis   - Urgency classification (immediate/hours/days)- **Impact Scoring**: Comprehensive scoring system with critical trigger detection- Comprehensive error handling and logging
+
+market volatility as traders price in supply chain 
+
+disruptions and inflation risks...│  (Ollama)       │
+
+
+
+Key Events:└────────┬────────┘## 🏗️ Architecture
+
+  • US imposing 100% tariffs on China (Nov 1, 2025)
+
+  • Export controls on critical software         │
+
+```
 
          ▼   - Market direction predictions (stocks/crypto/forex/commodities)
 
+## License
+
 ┌─────────────────┐
+
+MIT
 
 │ Quality Check   │ ← Validation```
 
+## Credits
+
 │  (Qwen3:8b)     │
 
-└────────┬────────┘┌─────────────────┐   - Professional reasoning generation- **Automated Alerts**: Three-tier output system (All Posts, High Impact, Critical Alerts)
+Fork of [darrenwatt/truthy](https://github.com/darrenwatt/truthy), rewritten with:
 
-         │
+- Llama 3.2 3B LLM integration (CPU-optimized)└────────┬────────┘┌─────────────────┐   - Professional reasoning generation- **Automated Alerts**: Three-tier output system (All Posts, High Impact, Critical Alerts)
+
+- Quality check system
+
+- Market direction predictions         │
+
+- Professional prompt engineering
 
          ▼ (if score ≥ 25)│  Truth Social   │
 
@@ -1872,10 +2034,19 @@ docker compose restart mongodb
 
 ## 📚 Resources
 
-- **Qwen3 Documentation**: https://huggingface.co/Qwen/Qwen3-8B
+- **Llama 3.2 Documentation**: https://huggingface.co/meta-llama/Llama-3.2-3B-Instruct
 - **Ollama Documentation**: https://ollama.ai/docs
 - **Docker Compose Guide**: https://docs.docker.com/compose/
 - **MongoDB Setup**: https://www.mongodb.com/docs/
+
+### Model Comparison
+
+| Model | Size | Speed (GPU) | Speed (CPU) | Quality | Best For |
+|-------|------|-------------|-------------|---------|----------|
+| **Llama 3.2 3B** | 2GB | 4-5s | 15-30s | 90/100 | CPU servers, production |
+| Qwen3 8B | 5.2GB | 5-6s | 60-120s | 95/100 | GPU servers, max quality |
+
+**Recommendation**: Use **Llama 3.2 3B** for CPU-only servers. Use **Qwen3 8B** only if you have GPU and need absolute best quality.
 
 ---
 
@@ -1883,11 +2054,12 @@ docker compose restart mongodb
 
 - [x] Keyword matching with whole-word boundaries
 - [x] 221+ weighted keyword database
-- [x] Qwen3:8b LLM integration
+- [x] LLM integration (Llama 3.2 3B - CPU optimized)
 - [x] Quality check system
 - [x] Market direction predictions
 - [x] Discord rich embeds
 - [x] Training data collection
+- [x] Model comparison testing (Llama 3.2 3B vs Qwen3 8B)
 - [ ] spaCy NER model training
 - [ ] Hybrid pipeline (spaCy + LLM)
 - [ ] Performance monitoring dashboard
@@ -1928,12 +2100,13 @@ MIT License - See LICENSE file for details
 ## 🙏 Credits
 
 Originally forked from [darrenwatt/truthy](https://github.com/darrenwatt/truthy), extensively rewritten with:
-- Complete LLM integration (Qwen3:8b)
+- Complete LLM integration (Llama 3.2 3B - CPU optimized)
 - Quality check system
 - Market direction predictions
 - Professional prompt engineering
 - Comprehensive testing suite
+- Model comparison framework
 
 ---
 
-**Built with ❤️ using Qwen3:8b, Python, and Docker**
+**Built with ❤️ using Llama 3.2 3B, Python, and Docker**

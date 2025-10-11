@@ -22,23 +22,27 @@ logger = logging.getLogger(__name__)
 class LLMAnalyzer:
     """
     Intelligent LLM-based market analysis using Ollama
-    Uses local Qwen2.5:3b model for CPU-efficient semantic analysis
+    Uses CPU-optimized LLM model (default: Llama 3.2 3B)
     """
     
     def __init__(self, 
-                 ollama_url: str = "http://localhost:11434",
-                 model: str = "qwen3:8b",
+                 ollama_url: Optional[str] = None,
+                 model: Optional[str] = None,
                  timeout: int = 1200):  # Increased from 30 to 60 seconds
         """
         Initialize LLM Analyzer
         
         Args:
-            ollama_url: Ollama server URL
-            model: Model name (default: qwen3:8b - better reasoning)
+            ollama_url: Ollama server URL (default: from config)
+            model: Model name (default: from config - llama3.2:3b for CPU efficiency)
             timeout: Request timeout in seconds (120s for thorough analysis)
         """
-        self.ollama_url = ollama_url
-        self.model = model
+        # Import config for defaults
+        from src.config import Config
+        config = Config()
+        
+        self.ollama_url = ollama_url or config.OLLAMA_URL
+        self.model = model or config.OLLAMA_MODEL
         self.timeout = timeout
         
         # Verify Ollama is accessible
@@ -92,6 +96,22 @@ class LLMAnalyzer:
                 
                 start_time = time.time()
                 
+                # Get num_threads from config (CPU optimization)
+                from src.config import Config
+                config = Config()
+                num_threads = config.OLLAMA_NUM_THREADS
+                
+                # Build options dict
+                options = {
+                    "temperature": 0.1,
+                    "top_p": 0.9,
+                    "num_predict": 2000,
+                }
+                
+                # Add num_thread if configured (CPU optimization)
+                if num_threads > 0:
+                    options["num_thread"] = num_threads
+                
                 # Call Ollama API with generous limits for thorough analysis
                 response = requests.post(
                     f"{self.ollama_url}/api/generate",
@@ -99,11 +119,7 @@ class LLMAnalyzer:
                         "model": self.model,
                         "prompt": prompt,
                         "stream": False,
-                        "options": {
-                            "temperature": 0.1,  # Slightly higher for better reasoning
-                            "top_p": 0.9,
-                            "num_predict": 2000,  # Increased for comprehensive reasoning
-                        }
+                        "options": options
                     },
                     timeout=self.timeout
                 )
@@ -198,24 +214,34 @@ class LLMAnalyzer:
             
             logger.info("🔍 Running quality check on analysis...")
             
+            # Get num_threads from config (CPU optimization)
+            from src.config import Config
+            config = Config()
+            num_threads = config.OLLAMA_NUM_THREADS
+            
+            # Build options dict - Qwen3 Best Practices for non-thinking mode
+            # https://huggingface.co/Qwen/Qwen3-8B
+            options = {
+                "temperature": 0.7,
+                "top_p": 0.8,
+                "top_k": 20,
+                "min_p": 0,
+                "num_predict": 800,
+                "enable_thinking": False,  # Disable thinking mode for direct JSON
+            }
+            
+            # Add num_thread if configured (CPU optimization)
+            if num_threads > 0:
+                options["num_thread"] = num_threads
+            
             # Call Ollama for quality check
-            # IMPORTANT: Using Qwen3 Best Practices for non-thinking mode
-            # https://huggingface.co/Qwen/Qwen3-8B - Best Practices section
             response = requests.post(
                 f"{self.ollama_url}/api/generate",
                 json={
                     "model": self.model,
                     "prompt": prompt,
                     "stream": False,
-                    "options": {
-                        # Qwen3 Best Practices for non-thinking mode:
-                        "temperature": 0.7,     # Recommended for non-thinking
-                        "top_p": 0.8,           # Recommended for non-thinking
-                        "top_k": 20,            # Recommended for non-thinking
-                        "min_p": 0,             # Recommended for non-thinking
-                        "num_predict": 800,     # Shorter than main analysis
-                        "enable_thinking": False,  # Disable thinking mode for direct JSON response
-                    }
+                    "options": options
                 },
                 timeout=30  # Shorter timeout for QC
             )

@@ -38,8 +38,9 @@ class Config(object):
     FLARESOLVERR_PORT = int(os.getenv("FLARESOLVERR_PORT") or 8191)
 
     # Ollama LLM configuration
-    OLLAMA_MODEL = os.getenv("OLLAMA_MODEL") or "qwen3:8b"
+    OLLAMA_MODEL = os.getenv("OLLAMA_MODEL") or "llama3.2:3b"
     OLLAMA_URL = os.getenv("OLLAMA_URL") or "http://localhost:11434"
+    OLLAMA_NUM_THREADS = int(os.getenv("OLLAMA_NUM_THREADS") or 4)  # 0 = auto-detect
 
 
     def __init__(self):

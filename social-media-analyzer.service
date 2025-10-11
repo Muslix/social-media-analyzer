@@ -1,0 +1,29 @@
+[Unit]
+Description=Trump Truth Social Market Impact Analyzer
+After=network.target docker.service mongod.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/social-media-analyst
+Environment="PATH=/root/social-media-analyst/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+# Start command
+ExecStart=/root/social-media-analyst/venv/bin/python /root/social-media-analyst/main.py
+
+# Restart policy
+Restart=always
+RestartSec=10
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=truth-social-analyzer
+
+# Resource limits
+MemoryMax=2G
+CPUQuota=200%
+
+[Install]
+WantedBy=multi-user.target
