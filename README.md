@@ -1,10 +1,10 @@
-# 🤖 Truth Social Market Impact Analyzer
+# 🤖 Social Media Market Impact Analyzer
 
-AI-powered real-time analysis of Truth Social posts for market impact prediction.
+AI-powered real-time analysis of social media posts for market impact prediction.
 
 ## What it does
 
-- **Monitors** any Truth Social account (not just Trump - configurable via `TRUTH_USERNAME`)
+- **Monitors** any Truth Social account (e.g., political figures, market influencers)
 - **Analyzes** posts using 221+ weighted keywords across trade, geopolitics, crypto, and markets
 - **Predicts** market impact using Llama 3.2 3B LLM (CPU-optimized)
 - **Sends** Discord alerts for high-impact posts with market direction predictions
@@ -51,8 +51,8 @@ python main.py
 Required environment variables in `.env`:
 
 ```env
-# Truth Social (works with any account!)
-TRUTH_USERNAME=realDonaldTrump
+# Truth Social Account (configure any account to monitor)
+TRUTH_USERNAME=your_account_to_monitor
 
 # MongoDB
 MONGO_DBSTRING=mongodb://localhost:27017/
@@ -99,7 +99,7 @@ Service automatically:
 
 ## How It Works
 
-1. **Monitor** → Fetches new posts from configured Truth Social account
+1. **Monitor** → Fetches new posts from configured social media account
 2. **Filter** → Analyzes with 221+ weighted keywords (whole-word matching)
 3. **LLM Analysis** → If keyword score ≥ 20, runs Llama 3.2 3B analysis
 4. **Quality Check** → Validates analysis quality before Discord
@@ -125,12 +125,13 @@ Service automatically:
 - [x] Discord alerts with rich embeds
 - [x] Training data collection
 - [x] Systemd auto-restart service
-- [ ] **Multi-account support** (monitor multiple Truth Social accounts)
+- [ ] **Multi-account monitoring** (monitor multiple accounts simultaneously)
+- [ ] **X/Twitter integration** (expand beyond Truth Social)
 - [ ] **Custom spaCy NER model** (train on collected data)
 - [ ] **Hybrid pipeline** (spaCy NER + LLM fallback)
 - [ ] **Performance monitoring dashboard**
 - [ ] **Web UI** for configuration and monitoring
-- [ ] **X/Twitter support** (expand beyond Truth Social)
+- [ ] **Additional platforms** (Mastodon, Bluesky support)
 
 ## Tech Stack
 
