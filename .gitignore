@@ -131,6 +131,10 @@ celerybeat.pid
 # Environments
 .env
 .envrc
+.env.local
+.env.*.local
+*.env
+!.env.example
 .venv
 env/
 venv/
@@ -208,12 +212,26 @@ cython_debug/
 # Learn more at https://abstra.io/docs
 .abstra/
 
-# Visual Studio Code
-#  Visual Studio Code specific template is maintained in a separate VisualStudioCode.gitignore 
-#  that can be found at https://github.com/github/gitignore/blob/main/Global/VisualStudioCode.gitignore
-#  and can be added to the global gitignore or merged into this file. However, if you prefer, 
-#  you could uncomment the following to ignore the entire vscode folder
-# .vscode/
+# IDEs & Editors
+.idea/
+.vscode/
+.fleet/
+.history/
+*.code-workspace
+*.sublime-workspace
+*.sublime-project
+
+# OS Artifacts
+.DS_Store
+.AppleDouble
+Thumbs.db
+Desktop.ini
+
+# Editor swap files / backups
+*.swp
+*.swo
+*~
+*.bak
 
 # Ruff stuff:
 .ruff_cache/

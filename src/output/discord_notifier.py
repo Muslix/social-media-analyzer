@@ -216,14 +216,59 @@ class DiscordNotifier:
                     "inline": False
                 })
         
-        # Critical Keywords (only critical triggers)
+        # Keywords - ALWAYS show for all posts
         if keyword_analysis:
             details = keyword_analysis.get('details', {})
             
-            if 'critical_triggers' in details and details['critical_triggers']:
+            # Collect all keywords from the structured format
+            all_keywords = []
+            keywords_dict = details.get('keywords', {})
+            
+            # Collect from each category with their scores
+            keyword_details = []
+            for category in ['critical', 'high', 'medium', 'companies']:
+                if category in keywords_dict:
+                    for keyword_tuple in keywords_dict[category]:
+                        # Keywords are stored as TUPLES: (keyword_name, keyword_score)
+                        if isinstance(keyword_tuple, (list, tuple)) and len(keyword_tuple) >= 2:
+                            keyword_name = keyword_tuple[0]
+                            keyword_score = keyword_tuple[1]
+                            all_keywords.append(keyword_name)
+                            keyword_details.append((keyword_name, keyword_score))
+            
+            # Also check actions
+            actions = details.get('actions', {}).get('actions', [])
+            for action_tuple in actions:
+                if isinstance(action_tuple, (list, tuple)) and len(action_tuple) >= 2:
+                    action_word = action_tuple[0]
+                    action_score = action_tuple[1]
+                    if action_word not in all_keywords:
+                        all_keywords.append(action_word)
+                        keyword_details.append((action_word, action_score))
+            
+            if all_keywords:
+                # Sort by score (highest first) and limit to top 8
+                keyword_details.sort(key=lambda x: x[1], reverse=True)
+                top_keywords = keyword_details[:8]
+                
+                # Format: keyword (score)
+                keyword_text = ", ".join([f"**{kw}** ({score})" for kw, score in top_keywords])
+                more_text = f" (+{len(all_keywords) - 8} more)" if len(all_keywords) > 8 else ""
+                
+                # Show total score
+                total_keyword_score = keyword_analysis.get('impact_score', 0)
+                
+                fields.append({
+                    "name": f"🔑 Keywords: {len(all_keywords)} matched • Score: {total_keyword_score}{more_text}",
+                    "value": keyword_text[:500],
+                    "inline": False
+                })
+            
+            # Also show critical triggers if present (for high-impact posts)
+            if llm_analysis and 'critical_triggers' in details and details['critical_triggers']:
                 triggers = ", ".join(details['critical_triggers'][:4])
                 fields.append({
-                    "name": "🔴 Critical Keywords",
+                    "name": "🔴 Critical Triggers",
                     "value": triggers[:300],
                     "inline": False
                 })

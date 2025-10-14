@@ -15,6 +15,8 @@ from src.data.keywords import (
     ACTION_VERBS
 )
 
+from src.enums import ImpactLevel
+
 
 class MarketImpactAnalyzer:
     """Intelligent market impact analysis with multiple detection strategies"""
@@ -96,14 +98,14 @@ class MarketImpactAnalyzer:
             return None
         
         # Determine impact level
-        impact_level, alert_emoji = self._calculate_impact_level(total_score, critical_triggers)
-        
+        impact_level = self._calculate_impact_level(total_score, critical_triggers)
+
         return {
-            'impact_level': impact_level,
+            'impact_level': impact_level.label,
             'impact_score': total_score,
-            'alert_emoji': alert_emoji,
+            'alert_emoji': impact_level.alert_emoji,
             'details': analysis_details,
-            'summary': f"{alert_emoji} {impact_level} - Score: {total_score}"
+            'summary': f"{impact_level.alert_emoji} {impact_level.label} - Score: {total_score}"
         }
     
     def _analyze_keywords(self, text: str) -> Tuple[int, Dict]:
@@ -300,13 +302,13 @@ class MarketImpactAnalyzer:
         
         return score, {'actions': found_actions} if found_actions else {}
     
-    def _calculate_impact_level(self, score: int, critical_triggers: List[str]) -> Tuple[str, str]:
+    def _calculate_impact_level(self, score: int, critical_triggers: List[str]) -> ImpactLevel:
         """Determine impact level based on score and triggers"""
         if critical_triggers or score >= 50:
-            return "🔴 CRITICAL", "🚨🚨🚨"
+            return ImpactLevel.CRITICAL
         elif score >= 25:
-            return "🟠 HIGH", "🚨"
+            return ImpactLevel.HIGH
         elif score >= 10:
-            return "🟡 MEDIUM", "⚠️"
+            return ImpactLevel.MEDIUM
         else:
-            return "🟢 LOW", "ℹ️"
+            return ImpactLevel.LOW

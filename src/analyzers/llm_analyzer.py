@@ -5,7 +5,7 @@ Provides intelligent semantic analysis for posts that pass keyword filter
 import json
 import logging
 import requests
-from typing import Dict, Optional
+from typing import Dict, Optional, TYPE_CHECKING
 from datetime import datetime, UTC
 import time
 import sys
@@ -16,6 +16,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../prompts'))
 from market_analysis_prompt import build_market_analysis_prompt
 from quality_check_prompt import build_quality_check_prompt
 
+if TYPE_CHECKING:  # pragma: no cover - type checking only
+    from src.config import Config
+
 logger = logging.getLogger(__name__)
 
 
@@ -25,10 +28,11 @@ class LLMAnalyzer:
     Uses CPU-optimized LLM model (default: Llama 3.2 3B)
     """
     
-    def __init__(self, 
+    def __init__(self,
                  ollama_url: Optional[str] = None,
                  model: Optional[str] = None,
-                 timeout: int = 1200):  # Increased from 30 to 60 seconds
+                 timeout: int = 1200,
+                 config: Optional["Config"] = None):  # Increased from 30 to 60 seconds
         """
         Initialize LLM Analyzer
         
@@ -37,14 +41,17 @@ class LLMAnalyzer:
             model: Model name (default: from config - llama3.2:3b for CPU efficiency)
             timeout: Request timeout in seconds (120s for thorough analysis)
         """
-        # Import config for defaults
-        from src.config import Config
-        config = Config()
-        
-        self.ollama_url = ollama_url or config.OLLAMA_URL
-        self.model = model or config.OLLAMA_MODEL
+        # Import config for defaults (lazy to avoid circular imports on type checking)
+        if config is None:
+            from src.config import Config  # Local import keeps module load cheap
+            config = Config()
+
+        self.config = config
+        self.ollama_url = ollama_url or self.config.OLLAMA_URL
+        self.model = model or self.config.OLLAMA_MODEL
         self.timeout = timeout
-        
+        self.num_threads = self.config.OLLAMA_NUM_THREADS
+
         # Verify Ollama is accessible
         self._verify_connection()
     
@@ -96,11 +103,6 @@ class LLMAnalyzer:
                 
                 start_time = time.time()
                 
-                # Get num_threads from config (CPU optimization)
-                from src.config import Config
-                config = Config()
-                num_threads = config.OLLAMA_NUM_THREADS
-                
                 # Build options dict
                 options = {
                     "temperature": 0.1,
@@ -109,8 +111,8 @@ class LLMAnalyzer:
                 }
                 
                 # Add num_thread if configured (CPU optimization)
-                if num_threads > 0:
-                    options["num_thread"] = num_threads
+                if self.num_threads > 0:
+                    options["num_thread"] = self.num_threads
                 
                 # Call Ollama API with generous limits for thorough analysis
                 response = requests.post(
@@ -214,11 +216,6 @@ class LLMAnalyzer:
             
             logger.info("🔍 Running quality check on analysis...")
             
-            # Get num_threads from config (CPU optimization)
-            from src.config import Config
-            config = Config()
-            num_threads = config.OLLAMA_NUM_THREADS
-            
             # Build options dict - Qwen3 Best Practices for non-thinking mode
             # https://huggingface.co/Qwen/Qwen3-8B
             options = {
@@ -231,8 +228,8 @@ class LLMAnalyzer:
             }
             
             # Add num_thread if configured (CPU optimization)
-            if num_threads > 0:
-                options["num_thread"] = num_threads
+            if self.num_threads > 0:
+                options["num_thread"] = self.num_threads
             
             # Call Ollama for quality check
             response = requests.post(

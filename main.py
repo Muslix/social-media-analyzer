@@ -1,6 +1,7 @@
 import logging
 import time
 from datetime import datetime, UTC
+from typing import Any, Dict, List
 import requests
 from src.config import Config
 from pymongo import MongoClient
@@ -8,7 +9,6 @@ from urllib.parse import urlencode
 from functools import wraps
 from ratelimit import limits, sleep_and_retry
 import backoff
-from bs4 import BeautifulSoup
 import re
 
 # Import our custom modules
@@ -16,6 +16,10 @@ from src.analyzers.market_analyzer import MarketImpactAnalyzer
 from src.analyzers.llm_analyzer import LLMAnalyzer
 from src.output.formatter import OutputFormatter
 from src.output.discord_notifier import DiscordNotifier
+from src.scrapers.nitter_scraper import NitterScraper
+from src.scrapers.truth_social_scraper import TruthSocialScraper
+from src.services.post_processing_pipeline import PostProcessingPipeline
+from src.enums import PostStatus, MediaType, Platform
 
 # Configure logging
 config = Config()
@@ -28,11 +32,24 @@ logger = logging.getLogger(__name__)
 
 # Initialize analyzers and notifiers
 market_analyzer = MarketImpactAnalyzer()
-llm_analyzer = LLMAnalyzer() if config.DISCORD_NOTIFY else None
-output_formatter = OutputFormatter()
+llm_analyzer = LLMAnalyzer(config=config)  # Always initialize LLM analyzer for training data collection
+output_formatter = None  # Will be initialized after database connection
 discord_notifier = DiscordNotifier(config.DISCORD_WEBHOOK_URL, username="🚨 Market Impact Bot") if config.DISCORD_NOTIFY else None
+discord_all_posts_notifier = DiscordNotifier(config.DISCORD_ALL_POSTS_WEBHOOK, username=config.DISCORD_ALL_POSTS_USERNAME) if config.DISCORD_ALL_POSTS_WEBHOOK else None
+nitter_scraper = NitterScraper() if config.X_ENABLED else None
 
-# LLM threshold for analysis
+# Initialize Truth Social scraper (optional FlareSolverr support)
+truth_social_scraper = None
+if config.TRUTH_USERNAMES or config.TRUTH_USERNAME:
+    truth_social_scraper = TruthSocialScraper(
+        instance=config.TRUTH_INSTANCE,
+        timeout=config.REQUEST_TIMEOUT,
+        use_flaresolverr=config.FLARESOLVERR_ENABLED,
+        flaresolverr_url=config.FLARESOLVERR_URL,
+        flaresolverr_timeout=config.FLARESOLVERR_TIMEOUT,
+    )
+
+# LLM threshold for analysis (with enhanced CRITICAL_COMBINATIONS)
 LLM_ANALYSIS_THRESHOLD = 20  # Posts with keyword score >= 20 get LLM analysis
 DISCORD_ALERT_THRESHOLD = 25  # Only HIGH/CRITICAL go to Discord
 
@@ -55,74 +72,23 @@ def make_request(url, headers):
 
 
 
-def make_flaresolverr_request(url, headers=None, params=None):
-    """Use FlareSolverr to fetch a URL and return a response-like object."""
-    flaresolverr_url = f"http://{config.FLARESOLVERR_ADDRESS}:{config.FLARESOLVERR_PORT}/v1"
-    payload = {
-        "cmd": "request.get",
-        "url": url,
-        "maxTimeout": 25000,
-    }
-    if headers:
-        payload["headers"] = headers
-    if params:
-        from urllib.parse import urlencode
-        url = url + "?" + urlencode(params)
-        payload["url"] = url
-
-    logger.info(f"Making FlareSolverr request: {url} (params={params})")
-
-    try:
-        resp = requests.post(flaresolverr_url, json=payload)
-        resp.raise_for_status()
-        result = resp.json()
-        if result.get("status") != "ok":
-            logger.error(f"FlareSolverr error: {result}")
-            raise Exception(f"FlareSolverr error: {result}")
-        response_content = result["solution"]["response"]
-        logger.debug(f"FlareSolverr raw response (first 500 chars): {response_content[:500]}")
-        # Mimic a requests.Response object for .json() and .text
-        class FakeResponse:
-            def __init__(self, content):
-                self._content = content
-            def json(self):
-                import json
-                from bs4 import BeautifulSoup
-                # Try to parse as JSON directly
-                try:
-                    return json.loads(self._content)
-                except Exception:
-                    # Try to extract JSON from <pre>...</pre> in HTML
-                    soup = BeautifulSoup(self._content, "html.parser")
-                    pre = soup.find("pre")
-                    if pre:
-                        try:
-                            return json.loads(pre.text)
-                        except Exception as e:
-                            logger.error(f"Failed to parse JSON from <pre>: {e}")
-                            logger.error(f"<pre> content (first 500 chars): {pre.text[:500]}")
-                            raise
-                    logger.error("No <pre> tag found in FlareSolverr HTML response")
-                    logger.error(f"HTML content (first 500 chars): {self._content[:500]}")
-                    raise
-            @property
-            def text(self):
-                return self._content
-        return FakeResponse(response_content)
-    except Exception as e:
-        logger.error(f"FlareSolverr request failed for {url}: {e}")
-        raise
+# Legacy direct scraping helper retained for non-FlareSolverr code paths
 
 
 
 def connect_mongodb():
-    """Connect to MongoDB and return the collection"""
+    """Connect to MongoDB and return the post + analysis collections"""
     try:
         client = MongoClient(config.MONGO_DBSTRING)
         db = client[config.MONGO_DB]
-        collection = db[config.MONGO_COLLECTION]
-        logger.info("Successfully connected to MongoDB")
-        return collection
+        posts_collection = db[config.MONGO_COLLECTION]
+        analysis_collection = db[config.MONGO_ANALYSIS_COLLECTION]
+        logger.info(
+            "Successfully connected to MongoDB (posts: %s, analysis: %s)",
+            config.MONGO_COLLECTION,
+            config.MONGO_ANALYSIS_COLLECTION
+        )
+        return posts_collection, analysis_collection
     except Exception as e:
         logger.error(f"Failed to connect to MongoDB: {e}")
         # Check for SSL handshake/network policy errors
@@ -139,11 +105,18 @@ def connect_mongodb():
 
 def is_post_processed(collection, post_id):
     """Check if a post has already been processed"""
-    return collection.find_one({"_id": post_id}) is not None
+    doc = collection.find_one({"_id": post_id})
+    if not doc:
+        return False
+    status = doc.get("status")
+    if status is None:
+        return True
+    return status == PostStatus.PROCESSED.value
 
 def mark_post_processed(collection, post):
     """Mark a post as processed in MongoDB with additional metadata"""
     try:
+        allowed_media_types = MediaType.allowed_values()
         doc = {
             "_id": post["id"],
             "content": post.get("content", ""),
@@ -151,13 +124,14 @@ def mark_post_processed(collection, post):
             "sent_at": datetime.now(UTC),
             "username": post.get("account", {}).get("username", ""),
             "display_name": post.get("account", {}).get("display_name", ""),
+            "status": PostStatus.PROCESSED.value,
             "media_attachments": [
                 {
                     "type": m.get("type"),
                     "url": m.get("url") or m.get("preview_url")
                 }
                 for m in post.get("media_attachments", [])
-                if m.get("type") in ["image", "video", "gifv"]
+                if m.get("type") in allowed_media_types
             ]
         }
         collection.insert_one(doc)
@@ -166,62 +140,171 @@ def mark_post_processed(collection, post):
         logger.error(f"Error marking post as processed: {e}")
         raise
 
-def save_to_file(message, media_attachments=None, market_analysis=None):
-    """Save post to files using OutputFormatter"""
-    output = output_formatter.format_analysis_output(message, market_analysis, media_attachments)
-    output_formatter.save_to_files(output, market_analysis)
-
-def get_truth_social_posts():
-    """Get posts from Truth Social using Mastodon API via ScrapeOps proxy"""
+def get_x_tweets():
+    """Get tweets from X/Twitter using Nitter scraper"""
+    if not config.X_ENABLED or not config.X_USERNAMES:
+        logger.debug("X/Twitter monitoring disabled")
+        return []
+    
     try:
-        # Prepare headers that look like a real browser
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'application/json',
-            'Accept-Language': 'en-US,en;q=0.5',
-            'Referer': f'https://{config.TRUTH_INSTANCE}/@{config.TRUTH_USERNAME}',
-            'Origin': f'https://{config.TRUTH_INSTANCE}'
-        }
-
-        # First get the user ID
-        lookup_url = f'https://{config.TRUTH_INSTANCE}/api/v1/accounts/lookup?acct={config.TRUTH_USERNAME}'
+        all_tweets = []
+        logger.info(f"🐦 Monitoring {len(config.X_USERNAMES)} X/Twitter accounts: {', '.join(['@' + u for u in config.X_USERNAMES])}")
         
-        response = make_flaresolverr_request(lookup_url, headers)
-        user_data = response.json()
-        
-        if not user_data or 'id' not in user_data:
-            raise ValueError(f"Could not find user ID for {config.TRUTH_USERNAME}")
+        for username in config.X_USERNAMES:
+            logger.info(f"📥 Fetching tweets from @{username}...")
+            tweets = nitter_scraper.get_tweets(username, max_results=5)  # Only last 5 tweets per user
             
-        user_id = user_data['id']
-        logger.debug(f"Found user ID: {user_id}")
-        
-        # Now get their posts
-        posts_url = f'https://{config.TRUTH_INSTANCE}/api/v1/accounts/{user_id}/statuses'
-        params = {
-            'exclude_replies': 'true',
-            'exclude_reblogs': 'true',
-            'limit': '40'
-        }
-        
-        response = make_flaresolverr_request(posts_url, params=params, headers=headers)
-        posts = response.json()
-        
-        if not isinstance(posts, list):
-            raise ValueError(f"Invalid posts response: {posts}")
+            # Transform to common format
+            for tweet in tweets:
+                all_tweets.append({
+                    'id': f"x_{tweet['id']}",  # Prefix with 'x_' to distinguish from Truth Social
+                    'content': tweet['text'],
+                    'created_at': tweet['created_at'],
+                    'account': {
+                        'username': username,
+                        'display_name': username
+                    },
+                    'platform': Platform.X.value,
+                    'url': tweet['url'],
+                    'metrics': tweet['metrics'],
+                    'media_attachments': []
+                })
             
-        logger.info(f"Retrieved {len(posts)} posts")
-        return posts
+            logger.info(f"✅ Got {len(tweets)} tweets from @{username}")
         
+        logger.info(f"🎯 Total tweets collected from X/Twitter: {len(all_tweets)}")
+        return all_tweets
     except Exception as e:
-        logger.error(f"Error getting Truth Social posts: {e}")
+        logger.error(f"Error getting X tweets: {e}")
         return []
 
+def get_truth_social_posts():
+    """Get posts from Truth Social using direct API access (no FlareSolverr)"""
+    # Check if Truth Social is enabled (either old TRUTH_USERNAME or new TRUTH_USERNAMES)
+    usernames = config.TRUTH_USERNAMES if config.TRUTH_USERNAMES else ([config.TRUTH_USERNAME] if config.TRUTH_USERNAME else [])
+    
+    if not usernames or not truth_social_scraper:
+        logger.debug("Truth Social monitoring disabled")
+        return []
+
+    try:
+        all_posts: List[Dict[str, Any]] = []
+        logger.info(f"🇺🇸 Monitoring {len(usernames)} Truth Social account(s): {', '.join(['@' + u for u in usernames])}")
+
+        for username in usernames:
+            posts = truth_social_scraper.get_posts(username, max_results=5)
+
+            if posts:
+                all_posts.extend(posts)
+                logger.info(f"✅ Got {len(posts)} posts from Truth Social @{username}")
+            else:
+                logger.warning(f"⚠️  No posts retrieved for @{username}")
+                logger.warning(f"⚠️  Truth Social may be using Cloudflare protection")
+
+        logger.info(f"🎯 Total posts collected from Truth Social: {len(all_posts)}")
+        return all_posts
+
+    except Exception as e:
+        logger.error(f"Error getting Truth Social posts: {e}")
+        logger.warning("💡 If Cloudflare is blocking access, consider:")
+        logger.warning("   1. Using a VPN/proxy")
+        logger.warning("   2. Waiting and trying again later")
+        logger.warning("   3. Focusing on X/Twitter monitoring only")
+        return []
+
+
+def collect_posts() -> List[Dict[str, Any]]:
+    """Collect posts from all configured platforms"""
+    all_posts: List[Dict[str, Any]] = []
+
+    truth_posts: List[Dict[str, Any]] = []
+    x_tweets: List[Dict[str, Any]] = []
+
+    if config.TRUTH_USERNAMES or config.TRUTH_USERNAME:
+        truth_posts = get_truth_social_posts()
+        all_posts.extend(truth_posts)
+
+    if config.X_ENABLED:
+        x_tweets = get_x_tweets()
+        all_posts.extend(x_tweets)
+
+    logger.info(
+        "📊 Total posts collected: %s (Truth Social: %s, X: %s)",
+        len(all_posts),
+        sum(1 for post in all_posts if post.get('platform') == Platform.TRUTH_SOCIAL.value),
+        sum(1 for post in all_posts if post.get('platform') == Platform.X.value)
+    )
+
+    return all_posts
+
+
+def show_legal_disclaimer():
+    """Display legal disclaimer and get user consent"""
+    import sys
+    
+    if not config.ACCEPT_LEGAL_DISCLAIMER:
+        disclaimer = """
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                        ⚖️  LEGAL DISCLAIMER & WARNING ⚖️                      ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+This tool scrapes publicly available data from social media platforms.
+
+⚠️  IMPORTANT LEGAL CONSIDERATIONS:
+
+1. You are SOLELY RESPONSIBLE for compliance with:
+   • Platform Terms of Service (X/Twitter, Truth Social)
+   • Local, national, and international laws
+   • Data protection regulations (GDPR, CCPA, etc.)
+
+2. This tool is for EDUCATIONAL/RESEARCH purposes only
+   • Not intended for commercial use without proper authorization
+   • Does not guarantee legal compliance in all jurisdictions
+
+3. Scraping Considerations:
+   • Monitors PUBLICLY AVAILABLE posts only
+   • Uses rate limiting and respectful delays (10min default)
+   • May be against platform ToS - check before use
+   • Platforms may block your IP or take legal action
+
+4. Recommended Actions:
+   • Review DISCLAIMER.md for full legal information
+   • Consult a lawyer for commercial use
+   • Consider using official APIs (X API) when available
+   • Monitor public accounts only
+
+📄 Full disclaimer: See DISCLAIMER.md in the project root
+
+By continuing, you acknowledge:
+✓ You have read and understood this warning
+✓ You accept all risks and legal responsibility
+✓ You will comply with all applicable laws and Terms of Service
+✓ This is for personal research/educational use only
+
+══════════════════════════════════════════════════════════════════════════════
+"""
+
+        logger.warning(disclaimer)
+        logger.warning("Proceeding without interactive confirmation. Set ACCEPT_LEGAL_DISCLAIMER=true to suppress this banner.")
+
+
 def main():
-    logger.info("Starting Truth Social monitor...")
+    # Show legal disclaimer first
+    show_legal_disclaimer()
+    
+    logger.info("🚀 Starting Multi-Platform Social Media Monitor...")
+    
+    # Count enabled accounts
+    truth_count = len(config.TRUTH_USERNAMES) if config.TRUTH_USERNAMES else (1 if config.TRUTH_USERNAME else 0)
+    x_count = len(config.X_USERNAMES) if config.X_ENABLED else 0
+    
+    logger.info(f"  Truth Social: {'✅ Enabled' if truth_count > 0 else '❌ Disabled'} ({truth_count} account{'' if truth_count == 1 else 's'})")
+    logger.info(f"  X/Twitter: {'✅ Enabled' if config.X_ENABLED else '❌ Disabled'} ({x_count} account{'' if x_count == 1 else 's'})")
+    logger.info(f"  Check Interval: Every {config.REPEAT_DELAY} seconds ({config.REPEAT_DELAY // 60} minutes)")
     
     # Connect to MongoDB
     try:
-        mongo_collection = connect_mongodb()
+        posts_collection, analysis_collection = connect_mongodb()
     except Exception as e:
         logger.error(f"Failed to connect to MongoDB in main: {e}")
         if (
@@ -234,112 +317,32 @@ def main():
                 "Reminder: Check your MongoDB Atlas Network Access Policy, firewall, and IP whitelist settings."
             )
         raise
+    
+    global output_formatter
+    output_formatter = OutputFormatter(
+        analysis_collection=analysis_collection,
+        enable_file_export=config.ENABLE_FILE_EXPORT
+    )
+
+    pipeline = PostProcessingPipeline(
+        config=config,
+        market_analyzer=market_analyzer,
+        llm_analyzer=llm_analyzer,
+        output_formatter=output_formatter,
+        discord_notifier=discord_notifier,
+        discord_all_posts_notifier=discord_all_posts_notifier,
+        llm_threshold=LLM_ANALYSIS_THRESHOLD,
+        discord_threshold=DISCORD_ALERT_THRESHOLD,
+        is_processed_fn=is_post_processed,
+        mark_processed_fn=mark_post_processed,
+    )
 
     while True:
         try:
-            # Get posts
-            posts = get_truth_social_posts()
-            
-            # Process posts in chronological order (oldest first)
-            # This ensures Discord timeline shows posts in correct order (newest at bottom)
-            for post in sorted(posts, key=lambda x: x.get('created_at', ''), reverse=False):
-                # Validate post structure
-                if not isinstance(post, dict) or 'id' not in post:
-                    logger.warning(f"Invalid post structure: {post}")
-                    continue
-                
-                # Get and clean the content using BeautifulSoup
-                from bs4 import BeautifulSoup
-                content = post.get('content') or post.get('text', '')
-                soup = BeautifulSoup(content, 'html.parser')
-                cleaned_content = soup.get_text().strip()
-                
-                # Skip posts without meaningful text content (minimum 20 characters)
-                if not cleaned_content or len(cleaned_content.strip()) < 20:
-                    logger.debug(f"Post {post['id']} has insufficient text content ({len(cleaned_content.strip())} chars), skipping")
-                    continue
-                    
-                # Skip if already processed
-                if is_post_processed(mongo_collection, post['id']):
-                    logger.debug(f"Post {post['id']} already processed, skipping")
-                    continue
-                
-                logger.info(f"Processing new post {post['id']} with {len(cleaned_content)} characters of text")
-                
-                # Analyze market impact using keyword analyzer
-                market_analysis = market_analyzer.analyze(cleaned_content)
-                if market_analysis:
-                    logger.info(f"Market analysis: {market_analysis['summary']}")
-                
-                # LLM Analysis for high-impact posts (if Discord enabled)
-                llm_analysis = None
-                if config.DISCORD_NOTIFY and market_analysis and market_analysis['impact_score'] >= 20:
-                    logger.info(f"Running LLM analysis (score >= 20)...")
-                    llm_analysis = llm_analyzer.analyze(cleaned_content, market_analysis['impact_score'])
-                    
-                    # Save training data only if LLM analysis succeeded
-                    if llm_analysis:
-                        # Quality check the analysis before saving/sending
-                        qc_result = llm_analyzer.quality_check_analysis(cleaned_content, llm_analysis)
-                        
-                        if qc_result and not qc_result.get('approved', False):
-                            # Apply suggested fixes if available
-                            suggested_fixes = qc_result.get('suggested_fixes', {})
-                            if suggested_fixes.get('reasoning'):
-                                logger.info(f"📝 Applying improved reasoning from quality check")
-                                llm_analysis['reasoning'] = suggested_fixes['reasoning']
-                            if suggested_fixes.get('urgency'):
-                                logger.info(f"📝 Correcting urgency: {llm_analysis.get('urgency')} → {suggested_fixes['urgency']}")
-                                llm_analysis['urgency'] = suggested_fixes['urgency']
-                            if suggested_fixes.get('score') is not None:
-                                logger.info(f"📝 Adjusting score: {llm_analysis.get('score')} → {suggested_fixes['score']}")
-                                llm_analysis['score'] = suggested_fixes['score']
-                        
-                        # Save training data with quality info
-                        llm_analyzer.save_training_data(
-                            cleaned_content, 
-                            market_analysis['impact_score'], 
-                            llm_analysis,
-                            quality_check=qc_result
-                        )
-                    else:
-                        logger.warning(f"⚠️  LLM analysis failed for post {post['id']} - will NOT send Discord alert")
-                
-                # Prepare simple message for file output
-                created_at = datetime.fromisoformat(post.get('created_at', '').replace('Z', '+00:00'))
-                account = post.get('account', {})
-                username = account.get('username') or config.TRUTH_USERNAME
-                display_name = account.get('display_name', username)
-                post_type = config.POST_TYPE.capitalize()
-                message = f"**New {post_type} from {display_name} (@{username})**\n{cleaned_content}\n*Posted at: {created_at.strftime('%B %d, %Y at %I:%M %p %Z')}*"
-                
-                media_attachments = post.get('media_attachments', [])
-                
-                # Save to file with market analysis
-                save_to_file(message, media_attachments, market_analysis)
-                
-                # Send to Discord ONLY if LLM analysis succeeded (for high-impact posts)
-                if config.DISCORD_NOTIFY and discord_notifier and market_analysis:
-                    # Only send HIGH or CRITICAL alerts to Discord
-                    if market_analysis['impact_score'] >= 25:  # HIGH or CRITICAL
-                        # Require successful LLM analysis before sending to Discord
-                        if llm_analysis:
-                            post_url = f"https://truthsocial.com/@{config.TRUTH_USERNAME}/posts/{post['id']}"
-                            discord_notifier.send_market_alert(
-                                post_text=cleaned_content,
-                                keyword_analysis=market_analysis,
-                                llm_analysis=llm_analysis,
-                                post_url=post_url,
-                                author=f"@{config.TRUTH_USERNAME}",
-                                post_created_at=post.get('created_at')
-                            )
-                        else:
-                            logger.warning(f"⚠️  Skipping Discord alert for high-impact post due to failed LLM analysis (keyword score: {market_analysis['impact_score']})")
-
-                
-                # Mark as processed only if successfully saved
-                mark_post_processed(mongo_collection, post)
-                
+            posts = collect_posts()
+            if not posts:
+                logger.debug("No new posts collected in this cycle")
+            pipeline.process_posts(posts, posts_collection)
         except Exception as e:
             logger.error(f"Error in main loop: {e}")
             # Add network policy reminder here too

@@ -36,7 +36,7 @@ start:
 # Run test scenarios
 test:
 	@echo "🧪 Running LLM test scenarios..."
-	python3 tests/test_llm_scenarios.py
+	pytest tests/
 
 # Complete reset and start
 full-reset: restart clean-db
