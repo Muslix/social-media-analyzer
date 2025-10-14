@@ -13,6 +13,7 @@ class Platform(Enum):
 
     TRUTH_SOCIAL = "truthsocial"
     X = "x"
+    RSS = "rss"
 
     @classmethod
     def from_value(cls, value: str) -> "Platform":
@@ -23,10 +24,18 @@ class Platform(Enum):
 
     @property
     def emoji(self) -> str:
-        return "🐦" if self is Platform.X else "🇺🇸"
+        if self is Platform.X:
+            return "🐦"
+        if self is Platform.RSS:
+            return "📰"
+        return "🇺🇸"
 
     def default_post_type(self, fallback: str) -> str:
-        return "Tweet" if self is Platform.X else fallback.capitalize()
+        if self is Platform.X:
+            return "Tweet"
+        if self is Platform.RSS:
+            return "Article"
+        return fallback.capitalize()
 
 
 class MediaType(Enum):

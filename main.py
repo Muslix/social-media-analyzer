@@ -18,7 +18,9 @@ from src.output.formatter import OutputFormatter
 from src.output.discord_notifier import DiscordNotifier
 from src.scrapers.nitter_scraper import NitterScraper
 from src.scrapers.truth_social_scraper import TruthSocialScraper
+from src.scrapers.rss_scraper import RSSFeedScraper
 from src.services.post_processing_pipeline import PostProcessingPipeline
+from src.services.quiet_hours import QuietHoursManager
 from src.services.block_history import BlockHistoryRepository
 from src.services.interval_controller import IntervalController
 from src.enums import PostStatus, MediaType, Platform
@@ -50,6 +52,9 @@ if config.TRUTH_USERNAMES or config.TRUTH_USERNAME:
         flaresolverr_url=config.FLARESOLVERR_URL,
         flaresolverr_timeout=config.FLARESOLVERR_TIMEOUT,
     )
+
+quiet_hours_manager = QuietHoursManager(config.QUIET_HOURS_WINDOWS)
+rss_scraper = RSSFeedScraper() if config.RSS_FEEDS else None
 
 # LLM threshold for analysis (with enhanced CRITICAL_COMBINATIONS)
 LLM_ANALYSIS_THRESHOLD = 20  # Posts with keyword score >= 20 get LLM analysis
@@ -148,13 +153,33 @@ def get_x_tweets():
     """Get tweets from X/Twitter using Nitter scraper"""
     if not config.X_ENABLED or not config.X_USERNAMES:
         logger.debug("X/Twitter monitoring disabled")
-        return []
+        return [], {"skipped": [], "total": 0}
     
     try:
         all_tweets = []
-        logger.info(f"🐦 Monitoring {len(config.X_USERNAMES)} X/Twitter accounts: {', '.join(['@' + u for u in config.X_USERNAMES])}")
-        
-        for username in config.X_USERNAMES:
+        usernames = config.X_USERNAMES
+        logger.info(f"🐦 Monitoring {len(usernames)} X/Twitter accounts: {', '.join(['@' + u for u in usernames])}")
+
+        quiet_skips: List[Dict[str, Any]] = []
+
+        for username in usernames:
+            location_label = config.X_ACCOUNT_LOCATIONS.get(username.lower(), config.QUIET_HOURS_DEFAULT_LOCATION)
+            seconds, resume_at = quiet_hours_manager.time_until_available(location_label)
+            if seconds is not None:
+                resume_str = resume_at.strftime('%Y-%m-%d %H:%M %Z') if resume_at else "later"
+                logger.info(
+                    "⏸️ Quiet hours active for X/Twitter @%s (location %s). Next attempt after %s",
+                    username,
+                    location_label,
+                    resume_str
+                )
+                quiet_skips.append({
+                    "username": username,
+                    "location": location_label,
+                    "resume_at": resume_str,
+                })
+                continue
+
             logger.info(f"📥 Fetching tweets from @{username}...")
             tweets = nitter_scraper.get_tweets(username, max_results=5)  # Only last 5 tweets per user
             
@@ -175,12 +200,15 @@ def get_x_tweets():
                 })
             
             logger.info(f"✅ Got {len(tweets)} tweets from @{username}")
-        
+
+        if quiet_skips and len(quiet_skips) == len(usernames) and not all_tweets:
+            logger.info("⏸️ All X/Twitter accounts currently in quiet hours; skipping this cycle.")
+
         logger.info(f"🎯 Total tweets collected from X/Twitter: {len(all_tweets)}")
-        return all_tweets
+        return all_tweets, {"skipped": quiet_skips, "total": len(usernames)}
     except Exception as e:
         logger.error(f"Error getting X tweets: {e}")
-        return []
+        return [], {"skipped": [], "total": len(config.X_USERNAMES or [])}
 
 def get_truth_social_posts():
     """Get posts from Truth Social using direct API access (no FlareSolverr)"""
@@ -189,13 +217,32 @@ def get_truth_social_posts():
     
     if not usernames or not truth_social_scraper:
         logger.debug("Truth Social monitoring disabled")
-        return []
+        return [], {"skipped": [], "total": 0}
 
     try:
         all_posts: List[Dict[str, Any]] = []
         logger.info(f"🇺🇸 Monitoring {len(usernames)} Truth Social account(s): {', '.join(['@' + u for u in usernames])}")
 
+        quiet_skips: List[Dict[str, Any]] = []
+
         for username in usernames:
+            location_label = config.TRUTH_ACCOUNT_LOCATIONS.get(username.lower(), config.QUIET_HOURS_DEFAULT_LOCATION)
+            seconds, resume_at = quiet_hours_manager.time_until_available(location_label)
+            if seconds is not None:
+                resume_str = resume_at.strftime('%Y-%m-%d %H:%M %Z') if resume_at else "later"
+                logger.info(
+                    "⏸️ Quiet hours active for Truth Social @%s (location %s). Next attempt after %s",
+                    username,
+                    location_label,
+                    resume_str
+                )
+                quiet_skips.append({
+                    "username": username,
+                    "location": location_label,
+                    "resume_at": resume_str,
+                })
+                continue
+
             posts = truth_social_scraper.get_posts(username, max_results=5)
 
             if posts:
@@ -205,8 +252,11 @@ def get_truth_social_posts():
                 logger.warning(f"⚠️  No posts retrieved for @{username}")
                 logger.warning(f"⚠️  Truth Social may be using Cloudflare protection")
 
+        if quiet_skips and len(quiet_skips) == len(usernames) and not all_posts:
+            logger.info("⏸️ All Truth Social accounts currently in quiet hours; skipping this cycle.")
+
         logger.info(f"🎯 Total posts collected from Truth Social: {len(all_posts)}")
-        return all_posts
+        return all_posts, {"skipped": quiet_skips, "total": len(usernames)}
 
     except Exception as e:
         logger.error(f"Error getting Truth Social posts: {e}")
@@ -214,7 +264,59 @@ def get_truth_social_posts():
         logger.warning("   1. Using a VPN/proxy")
         logger.warning("   2. Waiting and trying again later")
         logger.warning("   3. Focusing on X/Twitter monitoring only")
-        return []
+        return [], {"skipped": [], "total": len(usernames)}
+
+
+def get_rss_posts() -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """Fetch items from configured RSS feeds."""
+    if not rss_scraper or not config.RSS_FEEDS:
+        return [], {"skipped": [], "total": 0}
+
+    all_entries: List[Dict[str, Any]] = []
+    quiet_skips: List[Dict[str, Any]] = []
+
+    for label, feed_url in config.RSS_FEEDS.items():
+        location_label = config.RSS_FEED_LOCATIONS.get(label.lower(), config.QUIET_HOURS_DEFAULT_LOCATION)
+        seconds, resume_at = quiet_hours_manager.time_until_available(location_label)
+        if seconds is not None:
+            resume_str = resume_at.strftime('%Y-%m-%d %H:%M %Z') if resume_at else "later"
+            logger.info(
+                "⏸️ Quiet hours active for RSS feed %s (location %s). Next attempt after %s",
+                label,
+                location_label,
+                resume_str
+            )
+            quiet_skips.append({
+                "feed": label,
+                "location": location_label,
+                "resume_at": resume_str,
+            })
+            continue
+
+        logger.info("📰 Fetching RSS feed %s", label)
+        entries = rss_scraper.fetch(feed_url, max_entries=5)
+        logger.info("✅ Got %s entries from %s", len(entries), label)
+
+        for entry in entries:
+            post_id = f"rss_{label}_{entry['id']}"
+            display_name = entry.get("title") or label
+            all_entries.append({
+                "id": post_id,
+                "content": entry.get("content") or entry.get("summary") or "",
+                "created_at": entry.get("created_at"),
+                "account": {
+                    "username": label,
+                    "display_name": display_name,
+                },
+                "platform": Platform.RSS.value,
+                "url": entry.get("url"),
+                "metrics": {},
+            })
+
+    if quiet_skips and len(quiet_skips) == len(config.RSS_FEEDS) and not all_entries:
+        logger.info("⏸️ All RSS feeds currently in quiet hours; skipping this cycle.")
+
+    return all_entries, {"skipped": quiet_skips, "total": len(config.RSS_FEEDS)}
 
 
 def collect_posts() -> List[Dict[str, Any]]:
@@ -223,20 +325,46 @@ def collect_posts() -> List[Dict[str, Any]]:
 
     truth_posts: List[Dict[str, Any]] = []
     x_tweets: List[Dict[str, Any]] = []
+    rss_items: List[Dict[str, Any]] = []
+    truth_meta = {"skipped": [], "total": 0}
+    x_meta = {"skipped": [], "total": 0}
+    rss_meta = {"skipped": [], "total": 0}
 
     if config.TRUTH_USERNAMES or config.TRUTH_USERNAME:
-        truth_posts = get_truth_social_posts()
+        truth_posts, truth_meta = get_truth_social_posts()
         all_posts.extend(truth_posts)
 
     if config.X_ENABLED:
-        x_tweets = get_x_tweets()
+        x_tweets, x_meta = get_x_tweets()
         all_posts.extend(x_tweets)
 
+    if config.RSS_FEEDS:
+        rss_items, rss_meta = get_rss_posts()
+        all_posts.extend(rss_items)
+
+    def _log_quiet(platform: str, meta: Dict[str, Any]):
+        if not meta.get("skipped"):
+            return
+        details = ", ".join(
+            f"@{item['username']} ({item.get('location') or 'N/A'} → {item.get('resume_at', 'later')})"
+            for item in meta["skipped"]
+        )
+        logger.info("⏸️ Quiet hours (%s): %s", platform, details)
+
+    _log_quiet("Truth Social", truth_meta)
+    _log_quiet("X/Twitter", x_meta)
+    _log_quiet("RSS", rss_meta)
+
+    truth_count = sum(1 for post in all_posts if post.get('platform') == Platform.TRUTH_SOCIAL.value)
+    x_count = sum(1 for post in all_posts if post.get('platform') == Platform.X.value)
+    rss_count = sum(1 for post in all_posts if post.get('platform') == Platform.RSS.value)
+
     logger.info(
-        "📊 Total posts collected: %s (Truth Social: %s, X: %s)",
+        "📊 Total posts collected: %s (Truth Social: %s, X: %s, RSS: %s)",
         len(all_posts),
-        sum(1 for post in all_posts if post.get('platform') == Platform.TRUTH_SOCIAL.value),
-        sum(1 for post in all_posts if post.get('platform') == Platform.X.value)
+        truth_count,
+        x_count,
+        rss_count,
     )
 
     return all_posts

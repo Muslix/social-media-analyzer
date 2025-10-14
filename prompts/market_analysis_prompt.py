@@ -37,6 +37,13 @@ MARKET DIRECTION GUIDELINES:
 - Use "neutral" ONLY if the post has NO clear market impact direction
 - For commodities: Use ONLY "up", "down", or "neutral" (NOT "mixed" or other values)
 
+URGENCY GUIDELINES:
+- "immediate" = action already under way or explicitly happening now/within the next few hours (forced trading reaction right now)
+- "hours" = expected developments inside the next 24 hours or events with a scheduled announcement later the same day
+- "days" = developments that could play out over the coming days with no hard immediate trigger
+- "weeks" = long-term policy discussions, exploratory talks, or anything without concrete timing
+- If the statement is speculative ("considering", "thinking about") with no timetable, default to "days" or "weeks" rather than "immediate"
+
 Provide your analysis in this JSON format:
 {{
   "score": <number 0-100>,
@@ -49,7 +56,7 @@ Provide your analysis in this JSON format:
   }},
   "key_events": [<list of specific events/actions mentioned>],
   "important_dates": [<list of dates mentioned in format "month day, year">],
-  "urgency": "immediate|hours|days"
+  "urgency": "immediate|hours|days|weeks"
 }}
 
 IMPORTANT:

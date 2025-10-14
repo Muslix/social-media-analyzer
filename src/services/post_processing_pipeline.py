@@ -119,6 +119,8 @@ class PostProcessingPipeline:
 
         if platform is Platform.X:
             post_url = post.get('url', f"https://x.com/{username}")
+        elif platform is Platform.RSS:
+            post_url = post.get('url') or post.get('canonical_url') or post.get('link')
         else:
             post_url = f"https://truthsocial.com/@{username}/posts/{post['id']}"
 
@@ -182,27 +184,63 @@ class PostProcessingPipeline:
         self.mark_processed_fn(mongo_collection, post)
 
     def _apply_quality_check(self, cleaned_content: str, llm_analysis: Dict[str, Any], market_analysis: Dict[str, Any]) -> None:
+        original_reasoning = llm_analysis.get('reasoning')
+        original_urgency = llm_analysis.get('urgency')
+        original_score = llm_analysis.get('score')
+
         qc_result = self.llm_analyzer.quality_check_analysis(cleaned_content, llm_analysis)
 
-        if qc_result and not qc_result.get('approved', False):
-            suggested_fixes = qc_result.get('suggested_fixes', {})
-            if suggested_fixes.get('reasoning'):
-                logger.info("📝 Applying improved reasoning from quality check")
-                llm_analysis['reasoning'] = suggested_fixes['reasoning']
-            if suggested_fixes.get('urgency'):
-                logger.info(
-                    "📝 Correcting urgency: %s → %s",
-                    llm_analysis.get('urgency'),
-                    suggested_fixes['urgency']
-                )
-                llm_analysis['urgency'] = suggested_fixes['urgency']
-            if suggested_fixes.get('score') is not None:
-                logger.info(
-                    "📝 Adjusting score: %s → %s",
-                    llm_analysis.get('score'),
-                    suggested_fixes['score']
-                )
-                llm_analysis['score'] = suggested_fixes['score']
+        if qc_result:
+            review_meta = llm_analysis.setdefault('quality_review', {})
+            review_meta.update({
+                "approved": bool(qc_result.get('approved', False)),
+                "issues_found": qc_result.get('issues_found', []),
+                "quality_score": qc_result.get('quality_score'),
+            })
+
+            if not qc_result.get('approved', False):
+                suggested_fixes = qc_result.get('suggested_fixes', {}) or {}
+                review_meta['suggested_fixes'] = suggested_fixes
+
+                reasoning_fix = (suggested_fixes.get('reasoning') or "").strip()
+                if reasoning_fix:
+                    if self._looks_like_final_reasoning(reasoning_fix):
+                        logger.info("📝 Applying improved reasoning from quality check")
+                        llm_analysis['reasoning'] = reasoning_fix
+                    else:
+                        logger.info("ℹ️  Reasoning suggestion looks like reviewer guidance; keeping original reasoning")
+                        review_meta['suggested_reasoning_note'] = reasoning_fix
+                        if original_reasoning is not None:
+                            llm_analysis['reasoning'] = original_reasoning
+
+                urgency_fix = (suggested_fixes.get('urgency') or "").strip()
+                normalized_urgency = self._normalize_urgency(urgency_fix)
+                if normalized_urgency:
+                    logger.info(
+                        "📝 Correcting urgency: %s → %s",
+                        llm_analysis.get('urgency'),
+                        normalized_urgency
+                    )
+                    llm_analysis['urgency'] = normalized_urgency
+                elif urgency_fix:
+                    logger.info("ℹ️  Urgency suggestion invalid (%s); keeping original urgency", urgency_fix)
+                    if original_urgency is not None:
+                        llm_analysis['urgency'] = original_urgency
+                    review_meta['suggested_urgency_note'] = urgency_fix
+
+                score_fix = suggested_fixes.get('score')
+                if isinstance(score_fix, (int, float)) and 0 <= score_fix <= 100:
+                    logger.info(
+                        "📝 Adjusting score: %s → %s",
+                        llm_analysis.get('score'),
+                        score_fix
+                    )
+                    llm_analysis['score'] = int(score_fix)
+                elif score_fix is not None:
+                    logger.info("ℹ️  Score suggestion out of bounds (%s); keeping original score", score_fix)
+                    if original_score is not None:
+                        llm_analysis['score'] = original_score
+                    review_meta['suggested_score_note'] = score_fix
 
         self.llm_analyzer.save_training_data(
             cleaned_content,
@@ -210,6 +248,53 @@ class PostProcessingPipeline:
             llm_analysis,
             quality_check=qc_result
         )
+
+    @staticmethod
+    def _looks_like_final_reasoning(reasoning: str) -> bool:
+        """Heuristic to decide if the suggested reasoning is ready for end users."""
+        if not reasoning:
+            return False
+
+        lowered = reasoning.lower()
+        instruction_starts = (
+            "remove ", "keep ", "rewrite", "reframe", "ensure ", "avoid ",
+            "do not", "don't", "make sure", "change ", "adjust ", "should ",
+            "break out", "mention", "focus on"
+        )
+        if lowered.startswith(instruction_starts):
+            return False
+
+        # Consider it guidance if it contains multiple imperative cues
+        guidance_keywords = ["remove ", " keep ", " rewrite", " reframe", " should ", " must ", " need to "]
+        if any(keyword in lowered for keyword in guidance_keywords):
+            # Allow short, direct rewrites such as "Dispute the claim." which look like instructions.
+            if len(reasoning.split()) <= 6:
+                return False
+
+        # Final reasoning should look like prose with at least one sentence terminator.
+        if '.' not in reasoning and '!' not in reasoning and '?' not in reasoning:
+            return False
+
+        return True
+
+    @staticmethod
+    def _normalize_urgency(raw_urgency: str) -> Optional[str]:
+        if not raw_urgency:
+            return None
+
+        lowered = raw_urgency.strip().lower()
+        valid = {"immediate", "hours", "days", "weeks"}
+        if lowered in valid:
+            return lowered
+
+        aliases = {
+            "hour": "hours",
+            "hrs": "hours",
+            "day": "days",
+            "week": "weeks",
+            "immediately": "immediate",
+        }
+        return aliases.get(lowered)
 
     def _persist_analysis(
         self,

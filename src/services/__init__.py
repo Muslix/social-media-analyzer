@@ -1,3 +1,3 @@
 """Service layer modules."""
 
-__all__ = ["post_processing_pipeline", "interval_controller", "block_history"]
+__all__ = ["post_processing_pipeline", "interval_controller", "block_history", "quiet_hours"]

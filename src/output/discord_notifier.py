@@ -160,9 +160,14 @@ class DiscordNotifier:
             })
             
             # Markets + Urgency with Direction
-            markets = llm_analysis.get('affected_markets', [])
+            market_direction = llm_analysis.get('market_direction', {}) or {}
+
+            markets = llm_analysis.get('affected_markets') or [
+                key for key in ['stocks', 'crypto', 'forex', 'commodities']
+                if key in market_direction
+            ] or ['stocks', 'crypto', 'forex', 'commodities']
+
             urgency = llm_analysis.get('urgency', 'unknown')
-            market_direction = llm_analysis.get('market_direction', {})
             
             urgency_map = {'immediate': '🔴', 'hours': '🟠', 'days': '🟡', 'weeks': '🟢'}
             
@@ -175,7 +180,12 @@ class DiscordNotifier:
                 'commodities': 'Commodities'
             }
             
+            seen_markets = set()
             for m in markets:
+                if m in seen_markets:
+                    continue
+                seen_markets.add(m)
+
                 label = market_labels.get(m, m.title())
                 direction = market_direction.get(m, 'neutral')
                 
@@ -197,6 +207,9 @@ class DiscordNotifier:
                 
                 market_lines.append(f"**{label}:** {direction_text}")
             
+            if not market_lines:
+                market_lines.append("No market direction provided by analysis.")
+
             market_text = "\n".join(market_lines)
             urgency_emoji = urgency_map.get(urgency, '⏰')
             

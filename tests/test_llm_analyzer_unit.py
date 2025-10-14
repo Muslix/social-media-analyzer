@@ -14,6 +14,7 @@ def fake_config():
         OLLAMA_URL="http://ollama.test",
         OLLAMA_MODEL="mock-model",
         OLLAMA_NUM_THREADS=0,
+        LLM_ERROR_WEBHOOK_URL=None,
     )
 
 
@@ -43,6 +44,47 @@ def test_parse_llm_response_handles_code_block(llm):
     """
     parsed = llm._parse_llm_response(raw)
     assert parsed["score"] == 80
+    assert parsed["urgency"] == "immediate"
+
+
+def test_parse_llm_response_sanitizes_newlines(llm):
+    raw = """
+    {
+        "score": 88,
+        "reasoning": "Line one
+Line two mentions \\\"quotes\\\" and breaks",
+        "urgency": "hours",
+    }
+    """
+    parsed = llm._parse_llm_response(raw)
+    assert parsed["score"] == 88
+    assert parsed["urgency"] == "hours"
+    assert "Line two" in parsed["reasoning"]
+
+
+def test_parse_llm_response_escapes_inner_quotes(llm):
+    raw = """
+    {
+        "score": 92,
+        "reasoning": "Markets view this as a risk-off signal where traders talk about "panic selling" across sectors.",
+        "urgency": "immediate"
+    }
+    """
+    parsed = llm._parse_llm_response(raw)
+    assert parsed["score"] == 92
+    assert "panic selling" in parsed["reasoning"]
+
+
+def test_parse_llm_response_removes_trailing_commas(llm):
+    raw = '{"score": 55, "reasoning": "Trailing comma test", "urgency": "days", "market_direction": {"stocks": "bearish",},}'
+    parsed = llm._parse_llm_response(raw)
+    assert parsed["market_direction"]["stocks"] == "bearish"
+
+
+def test_parse_llm_response_recovers_truncated_json(llm):
+    raw = '{"score": 90, "reasoning": "Tariff shock analysis", "urgency": "immediate"'
+    parsed = llm._parse_llm_response(raw)
+    assert parsed["score"] == 90
     assert parsed["urgency"] == "immediate"
 
 
@@ -120,6 +162,36 @@ def test_analyze_returns_none_after_failures(monkeypatch, llm, caplog):
     result = llm.analyze("No response", keyword_score=5, max_retries=1)
     assert result is None
     assert any("LLM analysis failed" in record.message for record in caplog.records)
+
+
+def test_analyze_failure_notifies_webhook(monkeypatch, fake_config):
+    fake_config.LLM_ERROR_WEBHOOK_URL = "https://webhook.test"
+    monkeypatch.setattr(LLMAnalyzer, "_verify_connection", lambda self: None)
+    llm = LLMAnalyzer(config=fake_config, timeout=5)
+
+    calls = {"webhook": None}
+
+    def fake_post(url, json=None, timeout=None):
+        if url.endswith("/api/generate"):
+            return SimpleNamespace(
+                status_code=200,
+                json=lambda: {"response": "not-json"},
+                raise_for_status=lambda: None,
+            )
+        calls["webhook"] = {"url": url, "payload": json}
+        return SimpleNamespace(
+            status_code=204,
+            json=lambda: {},
+            raise_for_status=lambda: None,
+        )
+
+    monkeypatch.setattr("src.analyzers.llm_analyzer.requests.post", fake_post)
+
+    result = llm.analyze("Example post text", keyword_score=15, max_retries=1)
+    assert result is None
+    assert calls["webhook"] is not None
+    assert calls["webhook"]["url"] == "https://webhook.test"
+    assert "Keyword Score" in calls["webhook"]["payload"]["content"]
 
 
 def test_quality_check_analysis_parses_response(monkeypatch, llm):

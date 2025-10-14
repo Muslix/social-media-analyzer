@@ -88,6 +88,10 @@ docker compose logs -f app
 # 6. Configure (if running locally instead of Docker)
 cp .env.example .env
 nano .env  # Edit with your settings
+#   Ollama aus dem Host im Container nutzen? Dann `OLLAMA_HOST=0.0.0.0 ollama serve`
+#   oder `ollama set-addr 0.0.0.0:11434`, damit `host.docker.internal` funktioniert.
+
+RSS-Feeds kannst du über `RSS_FEEDS=LABEL|https://feed-url;LABEL2|https://...` hinzufügen. Optional ordnest du sie mit `RSS_FEED_LOCATIONS=label:US` einer Quiet-Hours-Region zu (siehe unten).
 
 # 7. Run locally (optional alternative to Docker)
 python main.py
@@ -112,9 +116,16 @@ X_ENABLED=true
 # - @APompliano: Bitcoin podcaster, crypto advocate
 X_USERNAMES=elonmusk,BillAckman,michael_saylor,CathieDWood,chamath,APompliano
 
+# RSS Feeds (optional - semicolon separated label|url entries)
+RSS_FEEDS=USGOV|https://www.whitehouse.gov/briefing-room/feed/;REUTERS|https://www.reuters.com/finance/rss
+RSS_FEED_LOCATIONS=usgov:US,reuters:US
+
 # MongoDB
 MONGO_DBSTRING=mongodb://mongodb:27017/
 # (Use mongodb://localhost:27017/ when running everything on the host)
+MONGO_COLLECTION=posts
+MONGO_ANALYSIS_COLLECTION=analysis_results
+MONGO_BLOCK_HISTORY_COLLECTION=scraper_block_history
 
 # Adaptive polling interval (defaults to 10 minutes if min/max omitted)
 REPEAT_DELAY=600
@@ -129,6 +140,13 @@ EMPTY_FETCH_BACKOFF_MULTIPLIER=1.5
 FLARESOLVERR_ENABLED=true
 FLARESOLVERR_URL=http://flaresolverr:8191
 
+# Quiet hours (optional, format LABEL|Timezone|start-end; separate with ';')
+# Example: US|America/New_York|00:00-06:00;EU|Europe/Berlin|02:00-05:00
+QUIET_HOURS=
+QUIET_HOURS_DEFAULT_LOCATION=
+TRUTH_ACCOUNT_LOCATIONS=
+X_ACCOUNT_LOCATIONS=
+
 # Discord (optional)
 DISCORD_NOTIFY=true
 DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/YOUR_WEBHOOK
@@ -136,6 +154,8 @@ DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/YOUR_WEBHOOK
 # Ollama
 OLLAMA_MODEL=llama3.2:3b
 OLLAMA_NUM_THREADS=8  # Set to CPU core count (use 'nproc')
+# Optional when running in Docker: override container access to host Ollama
+# DOCKER_OLLAMA_URL=http://host.docker.internal:11434
 ```
 
 **Note:** Either Truth Social (`TRUTH_USERNAMES`) OR X/Twitter (`X_ENABLED=true`) must be configured. You can enable both for multi-platform monitoring. Each platform supports **multiple accounts** (comma-separated).
