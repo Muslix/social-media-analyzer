@@ -75,6 +75,8 @@ def test_get_posts_handles_fetch_failure(monkeypatch, caplog):
 
 def test_make_request_via_flaresolverr_success(monkeypatch):
     scraper = TruthSocialScraper(use_flaresolverr=True, flaresolverr_url="http://solver:8191")
+    monkeypatch.setattr(scraper, "_apply_jitter", lambda *a, **k: 0)
+    monkeypatch.setattr(scraper, "_pick_header_fingerprint", lambda: {"User-Agent": "Agent"})
 
     def fake_post(url, json=None, timeout=None):
         assert url.endswith("/v1")
@@ -106,6 +108,8 @@ def test_make_request_via_flaresolverr_success(monkeypatch):
 
 def test_make_request_via_flaresolverr_handles_error(monkeypatch):
     scraper = TruthSocialScraper(use_flaresolverr=True)
+    monkeypatch.setattr(scraper, "_apply_jitter", lambda *a, **k: 0)
+    monkeypatch.setattr(scraper, "_pick_header_fingerprint", lambda: {"User-Agent": "Agent"})
 
     def fake_post(url, json=None, timeout=None):
         payload = {"status": "error", "message": "solver failed"}
@@ -118,3 +122,28 @@ def test_make_request_via_flaresolverr_handles_error(monkeypatch):
     monkeypatch.setattr(tss.requests, "post", fake_post)
     result = scraper._make_request("https://truthsocial.com/api/v1/example")
     assert result is None
+
+
+def test_had_recent_block(monkeypatch):
+    scraper = TruthSocialScraper()
+    scraper._apply_jitter = lambda *a, **k: 0
+    now = 1_000_000.0
+    monkeypatch.setattr(tss.time, "time", lambda: now)
+    assert not scraper.had_recent_block()
+    scraper._mark_block_event()
+    assert scraper.had_recent_block(window_seconds=60)
+    monkeypatch.setattr(tss.time, "time", lambda: now + 61)
+    assert not scraper.had_recent_block(window_seconds=60)
+
+
+def test_block_history_recording(monkeypatch):
+    events = []
+
+    class Repo:
+        def record_event(self, **kwargs):
+            events.append(kwargs)
+
+    scraper = TruthSocialScraper(block_history=Repo())
+    scraper._mark_block_event(reason="http_403", metadata={"url": "https://example"})
+    assert events
+    assert events[0]["source"] == "truth_social"

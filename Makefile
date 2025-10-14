@@ -1,4 +1,4 @@
-.PHONY: help restart clean-db start test full-reset run-once logs test-quality-check
+.PHONY: help restart clean-db start test full-reset run-once logs test-quality-check dev-test status training-stats clean-all quick-restart
 
 # Default target
 help:
@@ -17,8 +17,9 @@ help:
 # Restart Docker containers
 restart:
 	@echo "🔄 Restarting Docker containers..."
-	docker compose down
-	docker compose up -d
+	@docker compose down
+	@docker rm -f mongodb flaresolverr >/dev/null 2>&1 || true
+	@docker compose up -d
 	@echo "⏳ Waiting for services to be ready..."
 	sleep 5
 	@echo "✅ Docker containers restarted"
@@ -30,6 +31,9 @@ clean-db:
 
 # Start the main application
 start:
+	@echo "🛠  Ensuring required services (MongoDB, FlareSolverr) are running..."
+	@docker compose up -d mongodb flaresolverr >/dev/null 2>&1 || true
+	@python3 scripts/wait_for_mongo.py
 	@echo "🚀 Starting Truth Social Analyst..."
 	python3 main.py
 
@@ -61,25 +65,6 @@ logs:
 	@echo "📄 Showing recent logs..."
 	@tail -n 50 output/truth_social_posts.txt 2>/dev/null || echo "No logs found"
 
-# Development shortcuts
-dev-test:
-	@echo "🧪 Running quick development test..."
-	@python3 << 'EOF'
-	from src.analyzers.llm_analyzer import LLMAnalyzer
-	import logging
-	logging.basicConfig(level=logging.INFO)
-	
-	post = """Breaking: 100% tariff on China effective November 1st, 2025."""
-	llm = LLMAnalyzer()
-	result = llm.analyze(post, 150)
-	
-	if result:
-	    print(f"\n✅ Score: {result['score']}/100")
-	    print(f"⏰ Urgency: {result['urgency']}")
-	    print(f"💹 Markets: {result.get('market_direction', {})}")
-	else:
-	    print("\n❌ Analysis failed")
-	EOF
 
 # Check service status
 status:
@@ -96,46 +81,12 @@ status:
 	@echo ""
 	@echo "FlareSolverr Status:"
 	@curl -s http://localhost:8191/ > /dev/null && echo "✅ FlareSolverr is running" || echo "❌ FlareSolverr is not running"
+	@echo ""
 
 # Show training data stats
 training-stats:
 	@echo "📊 Training Data Statistics:"
 	@python3 << 'EOF'
-	import json
-	import os
-	
-	file_path = 'training_data/llm_training_data.jsonl'
-	if os.path.exists(file_path):
-	    with open(file_path, 'r') as f:
-	        lines = f.readlines()
-	    
-	    print(f"Total entries: {len(lines)}")
-	    
-	    if lines:
-	        scores = []
-	        urgencies = {'immediate': 0, 'hours': 0, 'days': 0, 'weeks': 0}
-	        
-	        for line in lines:
-	            try:
-	                data = json.loads(line)
-	                scores.append(data.get('llm_score', 0))
-	                urgency = data.get('urgency', 'unknown')
-	                urgencies[urgency] = urgencies.get(urgency, 0) + 1
-	            except:
-	                pass
-	        
-	        if scores:
-	            print(f"Average score: {sum(scores)/len(scores):.1f}")
-	            print(f"Max score: {max(scores)}")
-	            print(f"Min score: {min(scores)}")
-	        
-	        print(f"\nUrgency distribution:")
-	        for urgency, count in sorted(urgencies.items(), key=lambda x: x[1], reverse=True):
-	            if count > 0:
-	                print(f"  {urgency}: {count}")
-	else:
-	    print("No training data found")
-	EOF
 
 # Clean all outputs and logs
 clean-all:

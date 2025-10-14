@@ -5,6 +5,7 @@ Supports direct Mastodon API access and optional FlareSolverr fallback
 import logging
 import json
 import time
+import random
 from typing import Dict, List, Optional, Any
 from datetime import datetime
 from urllib.parse import quote_plus
@@ -60,6 +61,8 @@ class TruthSocialScraper:
         use_flaresolverr: bool = False,
         flaresolverr_url: Optional[str] = None,
         flaresolverr_timeout: int = 60,
+        block_history=None,
+        initial_block_timestamp: Optional[float] = None,
     ):
         """
         Initialize Truth Social scraper
@@ -79,24 +82,19 @@ class TruthSocialScraper:
         base_solver_url = flaresolverr_url or "http://localhost:8191"
         self.flaresolverr_url = f"{base_solver_url.rstrip('/')}/v1"
         self.session = requests.Session()
+        self._rng = random.Random()
+        self._randomized_headers = self._build_header_pool()
+        self._last_block_timestamp: float = initial_block_timestamp or 0.0
+        self.block_history = block_history
 
-        # Use realistic browser headers
-        self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'application/json, text/plain, */*',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'DNT': '1',
-            'Connection': 'keep-alive',
-            'Sec-Fetch-Dest': 'empty',
-            'Sec-Fetch-Mode': 'cors',
-            'Sec-Fetch-Site': 'same-origin',
-        })
+        initial_headers = self._pick_header_fingerprint()
+        logger.debug("Initial Truth Social headers: %s", initial_headers)
+        self.session.headers.update(initial_headers)
     
     def _make_request(self, url: str, max_retries: int = 3) -> Optional[Any]:
         """
         Make HTTP request with retry logic
-        
+
         Args:
             url: URL to fetch
             max_retries: Maximum retry attempts
@@ -110,9 +108,16 @@ class TruthSocialScraper:
         for attempt in range(max_retries):
             try:
                 logger.debug(f"Request to {url} (attempt {attempt + 1}/{max_retries})")
-                
-                response = self.session.get(url, timeout=self.timeout)
-                
+                headers = self._pick_header_fingerprint()
+                delay = self._apply_jitter("truth_social", url)
+                logger.debug(
+                    "Using headers for request (sleep %.2fs): %s",
+                    delay,
+                    headers
+                )
+
+                response = self.session.get(url, headers=headers, timeout=self.timeout)
+
                 # Check for rate limiting
                 if response.status_code == 429:
                     retry_after = int(response.headers.get('Retry-After', 60))
@@ -124,6 +129,10 @@ class TruthSocialScraper:
                 if response.status_code == 403 or 'cf-ray' in response.headers:
                     logger.warning(f"⚠️  Cloudflare protection detected on {url}")
                     logger.warning(f"⚠️  Truth Social may be blocking automated access")
+                    self._mark_block_event(
+                        reason="http_403",
+                        metadata={"url": url, "status": response.status_code}
+                    )
                     return None
                 
                 response.raise_for_status()
@@ -144,11 +153,18 @@ class TruthSocialScraper:
         for attempt in range(max_retries):
             try:
                 logger.debug(f"FlareSolverr request to {url} (attempt {attempt + 1}/{max_retries})")
+                headers = self._pick_header_fingerprint()
+                delay = self._apply_jitter("truth_social_flaresolverr", url)
+                logger.debug(
+                    "Proxy headers via FlareSolverr (sleep %.2fs): %s",
+                    delay,
+                    headers
+                )
                 payload = {
                     "cmd": "request.get",
                     "url": url,
                     "maxTimeout": int(self.flaresolverr_timeout * 1000),
-                    "headers": dict(self.session.headers),
+                    "headers": headers,
                 }
                 response = requests.post(
                     self.flaresolverr_url,
@@ -176,6 +192,10 @@ class TruthSocialScraper:
                 if attempt < max_retries - 1:
                     time.sleep(min(2 ** attempt, 30))
                     continue
+                self._mark_block_event(
+                    reason=f"flaresolverr_status_{result.get('status')}",
+                    metadata={"url": url}
+                )
                 return None
 
             solution = result.get("solution", {})
@@ -186,6 +206,10 @@ class TruthSocialScraper:
             # If Cloudflare still blocks access, stop retrying to avoid loops
             if status_code == 403 and any("cloudflare" in str(val).lower() for val in headers.values()):
                 logger.warning("⚠️  Cloudflare challenge persists even after FlareSolverr attempt")
+                self._mark_block_event(
+                    reason="http_403",
+                    metadata={"url": url, "status": status_code}
+                )
                 return None
 
             flare_response = FlareSolverrResponse(status_code, headers, body, url)
@@ -196,11 +220,102 @@ class TruthSocialScraper:
                 if attempt < max_retries - 1:
                     time.sleep(min(2 ** attempt, 30))
                     continue
+                self._mark_block_event(
+                    reason="flaresolverr_http_error",
+                    metadata={"url": url, "error": str(exc)}
+                )
                 return None
 
             return flare_response
 
         return None
+    
+    def set_block_history_repo(self, repo) -> None:
+        self.block_history = repo
+
+    def set_last_block_timestamp(self, timestamp: Optional[float]) -> None:
+        if timestamp is not None:
+            self._last_block_timestamp = timestamp
+
+    def _mark_block_event(self, reason: str = "unknown", metadata: Optional[Dict[str, Any]] = None) -> None:
+        """Record that we hit Cloudflare or another blocking event."""
+        self._last_block_timestamp = time.time()
+        if not getattr(self, "block_history", None):
+            return
+
+        payload = {"instance": self.instance}
+        if metadata:
+            payload.update(metadata)
+
+        try:
+            self.block_history.record_event(
+                source="truth_social",
+                reason=reason,
+                metadata=payload,
+            )
+        except Exception as exc:
+            logger.debug("Failed to persist Truth Social block event: %s", exc)
+
+    def had_recent_block(self, window_seconds: int = 1800) -> bool:
+        """Whether a blocking event was seen within the given window."""
+        if not self._last_block_timestamp:
+            return False
+        return (time.time() - self._last_block_timestamp) <= window_seconds
+
+    def _build_header_pool(self) -> List[Dict[str, str]]:
+        """Construct a pool of believable browser headers for rotation."""
+        user_agents = [
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_5) AppleWebKit/605.1.15 "
+            "(KHTML, like Gecko) Version/17.4 Safari/605.1.15",
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 "
+            "(KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1",
+        ]
+
+        accept_languages = [
+            "en-US,en;q=0.9",
+            "en-GB,en;q=0.8,de;q=0.6",
+            "de-DE,de;q=0.9,en;q=0.6",
+        ]
+
+        accept_headers = [
+            "application/json, text/plain, */*",
+            "application/activity+json, application/json;q=0.9, */*;q=0.7",
+        ]
+
+        pool: List[Dict[str, str]] = []
+        for ua in user_agents:
+            for lang in accept_languages:
+                for accept in accept_headers:
+                    pool.append({
+                        "User-Agent": ua,
+                        "Accept": accept,
+                        "Accept-Language": lang,
+                        "Accept-Encoding": "gzip, deflate, br",
+                        "DNT": "1",
+                        "Connection": "keep-alive",
+                        "Sec-Fetch-Dest": "empty",
+                        "Sec-Fetch-Mode": "cors",
+                        "Sec-Fetch-Site": "same-origin",
+                    })
+
+        return pool
+
+    def _pick_header_fingerprint(self) -> Dict[str, str]:
+        """Select a random header fingerprint from the pool."""
+        if not self._randomized_headers:
+            self._randomized_headers = self._build_header_pool()
+        return dict(self._rng.choice(self._randomized_headers))
+
+    def _apply_jitter(self, label: str, url: str) -> float:
+        """Sleep for a small randomised interval before making a request."""
+        delay = round(self._rng.uniform(0.35, 1.25), 3)
+        logger.debug("Sleep %.3fs before %s request to %s", delay, label, url)
+        time.sleep(delay)
+        return delay
     
     def get_user_id(self, username: str) -> Optional[str]:
         """Resolve a Truth Social username to an internal Mastodon user ID."""

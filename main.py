@@ -19,6 +19,8 @@ from src.output.discord_notifier import DiscordNotifier
 from src.scrapers.nitter_scraper import NitterScraper
 from src.scrapers.truth_social_scraper import TruthSocialScraper
 from src.services.post_processing_pipeline import PostProcessingPipeline
+from src.services.block_history import BlockHistoryRepository
+from src.services.interval_controller import IntervalController
 from src.enums import PostStatus, MediaType, Platform
 
 # Configure logging
@@ -83,12 +85,14 @@ def connect_mongodb():
         db = client[config.MONGO_DB]
         posts_collection = db[config.MONGO_COLLECTION]
         analysis_collection = db[config.MONGO_ANALYSIS_COLLECTION]
+        block_history_collection = db[config.MONGO_BLOCK_HISTORY_COLLECTION]
         logger.info(
-            "Successfully connected to MongoDB (posts: %s, analysis: %s)",
+            "Successfully connected to MongoDB (posts: %s, analysis: %s, block_history: %s)",
             config.MONGO_COLLECTION,
-            config.MONGO_ANALYSIS_COLLECTION
+            config.MONGO_ANALYSIS_COLLECTION,
+            config.MONGO_BLOCK_HISTORY_COLLECTION,
         )
-        return posts_collection, analysis_collection
+        return posts_collection, analysis_collection, block_history_collection
     except Exception as e:
         logger.error(f"Failed to connect to MongoDB: {e}")
         # Check for SSL handshake/network policy errors
@@ -304,7 +308,7 @@ def main():
     
     # Connect to MongoDB
     try:
-        posts_collection, analysis_collection = connect_mongodb()
+        posts_collection, analysis_collection, block_history_collection = connect_mongodb()
     except Exception as e:
         logger.error(f"Failed to connect to MongoDB in main: {e}")
         if (
@@ -318,6 +322,26 @@ def main():
             )
         raise
     
+    block_history_repo = BlockHistoryRepository(block_history_collection)
+
+    if truth_social_scraper:
+        truth_social_scraper.set_block_history_repo(block_history_repo)
+        last = block_history_repo.get_latest_event_time(
+            "truth_social",
+            window_seconds=config.BLOCKED_BACKOFF_MAX or 3600
+        )
+        if last:
+            truth_social_scraper.set_last_block_timestamp(last.timestamp())
+
+    if nitter_scraper:
+        nitter_scraper.set_block_history_repo(block_history_repo)
+        last = block_history_repo.get_latest_event_time(
+            "nitter",
+            window_seconds=config.BLOCKED_BACKOFF_MAX or 3600
+        )
+        if last:
+            nitter_scraper.set_last_global_outage(last.timestamp())
+
     global output_formatter
     output_formatter = OutputFormatter(
         analysis_collection=analysis_collection,
@@ -336,8 +360,11 @@ def main():
         is_processed_fn=is_post_processed,
         mark_processed_fn=mark_post_processed,
     )
+    interval_controller = IntervalController(config)
+    consecutive_empty_cycles = 0
 
     while True:
+        posts: List[Dict[str, Any]] = []
         try:
             posts = collect_posts()
             if not posts:
@@ -345,7 +372,6 @@ def main():
             pipeline.process_posts(posts, posts_collection)
         except Exception as e:
             logger.error(f"Error in main loop: {e}")
-            # Add network policy reminder here too
             if (
                 "SSL handshake failed" in str(e)
                 or "tlsv1 alert internal error" in str(e)
@@ -355,10 +381,36 @@ def main():
                     "MongoDB connection failed due to SSL/network error. "
                     "Reminder: Check your MongoDB Atlas Network Access Policy, firewall, and IP whitelist settings."
                 )
-        
-        delay = int(config.REPEAT_DELAY)
-        logger.info(f"Waiting {delay} seconds before next check...")
-        time.sleep(delay)
+        finally:
+            if posts:
+                consecutive_empty_cycles = 0
+            else:
+                consecutive_empty_cycles += 1
+
+            blocked_sources: List[str] = []
+            if truth_social_scraper and truth_social_scraper.had_recent_block():
+                blocked_sources.append("Truth Social")
+            if nitter_scraper and nitter_scraper.has_recent_outage():
+                blocked_sources.append("Nitter")
+
+            if blocked_sources:
+                logger.warning(
+                    "Recent access issues detected for %s; applying extended backoff.",
+                    ", ".join(blocked_sources)
+                )
+
+            delay, reasons = interval_controller.compute_delay(
+                blocked=bool(blocked_sources),
+                consecutive_empty=consecutive_empty_cycles
+            )
+            reason_text = ", ".join(f"{name}={value}s" for name, value in reasons.items())
+            logger.info(
+                "Waiting %s seconds before next check (reasons: %s, empty streak: %s)",
+                delay,
+                reason_text,
+                consecutive_empty_cycles
+            )
+            time.sleep(delay)
 
 if __name__ == "__main__":
     main()

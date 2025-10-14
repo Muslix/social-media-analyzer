@@ -13,6 +13,12 @@ class Config(object):
     APPNAME = os.getenv("APPNAME") or 'Truth Social Monitor'
     ENV = os.getenv("ENV") or "DEV"
     REPEAT_DELAY = int(os.getenv("REPEAT_DELAY") or 300)  # 5 minutes default
+    REPEAT_MIN_DELAY = int(os.getenv("REPEAT_MIN_DELAY")) if os.getenv("REPEAT_MIN_DELAY") else None
+    REPEAT_MAX_DELAY = int(os.getenv("REPEAT_MAX_DELAY")) if os.getenv("REPEAT_MAX_DELAY") else None
+    BLOCKED_BACKOFF_MIN = int(os.getenv("BLOCKED_BACKOFF_MIN")) if os.getenv("BLOCKED_BACKOFF_MIN") else None
+    BLOCKED_BACKOFF_MAX = int(os.getenv("BLOCKED_BACKOFF_MAX")) if os.getenv("BLOCKED_BACKOFF_MAX") else None
+    EMPTY_FETCH_THRESHOLD = int(os.getenv("EMPTY_FETCH_THRESHOLD") or 3)
+    EMPTY_FETCH_BACKOFF_MULTIPLIER = float(os.getenv("EMPTY_FETCH_BACKOFF_MULTIPLIER") or 1.5)
 
     # Discord configuration
     DISCORD_NOTIFY = os.getenv("DISCORD_NOTIFY", 'True').lower() == 'true'
@@ -28,6 +34,7 @@ class Config(object):
     MONGO_DB = os.getenv("MONGO_DB") or "truthsocial"
     MONGO_COLLECTION = os.getenv("MONGO_COLLECTION") or "posts"
     MONGO_ANALYSIS_COLLECTION = os.getenv("MONGO_ANALYSIS_COLLECTION") or "analysis_results"
+    MONGO_BLOCK_HISTORY_COLLECTION = os.getenv("MONGO_BLOCK_HISTORY_COLLECTION") or "scraper_block_history"
     ENABLE_FILE_EXPORT = os.getenv("ENABLE_FILE_EXPORT", 'false').lower() == 'true'
 
     # Truth Social configuration

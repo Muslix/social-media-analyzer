@@ -25,6 +25,17 @@ def make_scraper(single_instance: str = "https://nitter.example") -> NitterScrap
     scraper._degraded_instances.clear()
     scraper._health_cache.clear()
     scraper._last_health_check = None
+    scraper._apply_jitter = lambda *a, **k: 0
+    scraper._header_pool = [{
+        "User-Agent": "Agent",
+        "Accept": "text/html",
+        "Accept-Language": "en-US",
+        "Accept-Encoding": "gzip",
+        "Connection": "keep-alive",
+        "DNT": "1",
+        "Upgrade-Insecure-Requests": "1",
+    }]
+    scraper._last_global_outage = 0.0
     return scraper
 
 
@@ -46,7 +57,7 @@ def test_get_tweets_parses_html(monkeypatch):
     monkeypatch.setattr(
         scraper,
         "session",
-        SimpleNamespace(get=lambda url, timeout: FakeResponse(sample_html))
+        SimpleNamespace(get=lambda url, timeout, headers=None: FakeResponse(sample_html))
     )
 
     tweets = scraper.get_tweets("elonmusk", max_results=1, max_retries=1)
@@ -58,12 +69,13 @@ def test_get_tweets_parses_html(monkeypatch):
     assert tweet["metrics"]["retweets"] == 300
     assert tweet["metrics"]["replies"] == 15
     assert tweet["platform"] == "x"
+    assert not scraper.has_recent_outage()
 
 
 def test_get_tweets_marks_degraded_on_failure(monkeypatch):
     scraper = make_scraper()
 
-    def failing_get(url, timeout):
+    def failing_get(url, timeout, headers=None):
         raise Timeout("simulated timeout")
 
     monkeypatch.setattr(scraper, "session", SimpleNamespace(get=failing_get))
@@ -72,6 +84,7 @@ def test_get_tweets_marks_degraded_on_failure(monkeypatch):
     assert tweets == []
     degraded = scraper.get_degraded_instances()
     assert degraded == ["https://nitter.example"]
+    assert scraper.has_recent_outage(window_seconds=3600)
 
 
 def test_run_health_check_uses_cache(monkeypatch):
@@ -83,7 +96,7 @@ def test_run_health_check_uses_cache(monkeypatch):
         call_counter["value"] += 1
         return response
 
-    monkeypatch.setattr(scraper, "session", SimpleNamespace(get=first_get))
+    monkeypatch.setattr(scraper, "session", SimpleNamespace(get=lambda url, timeout, headers=None: first_get(url, timeout)))
     first_results = scraper.run_health_check()
     assert call_counter["value"] == 1
     assert first_results["https://nitter.example"]["is_up"] is True
@@ -91,8 +104,23 @@ def test_run_health_check_uses_cache(monkeypatch):
     def fail_get(url, timeout):
         raise AssertionError("health check should use cache")
 
-    monkeypatch.setattr(scraper, "session", SimpleNamespace(get=fail_get))
+    monkeypatch.setattr(scraper, "session", SimpleNamespace(get=lambda url, timeout, headers=None: fail_get(url, timeout)))
     second_results = scraper.run_health_check()
 
     assert second_results == first_results
     assert call_counter["value"] == 1
+
+
+def test_block_history_recorded_on_global_outage():
+    events = []
+
+    class Repo:
+        def record_event(self, **kwargs):
+            events.append(kwargs)
+
+    scraper = make_scraper()
+    scraper.set_block_history_repo(Repo())
+    scraper.available_instances = ["https://nitter.example"]
+    scraper._mark_instance_failure("https://nitter.example", "status 403")
+    assert events
+    assert events[0]["source"] == "nitter"

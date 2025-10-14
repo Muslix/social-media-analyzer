@@ -5,6 +5,7 @@ Scrapes tweets without API key by rotating through public Nitter instances
 import requests
 import logging
 import time
+import random
 from typing import List, Dict, Optional, Any
 from datetime import datetime, UTC, timedelta
 from bs4 import BeautifulSoup
@@ -38,6 +39,8 @@ class NitterScraper:
         timeout: int = 30,
         eager_instance_check: bool = False,
         health_check_username: Optional[str] = None,
+        block_history=None,
+        initial_outage_timestamp: Optional[float] = None,
     ):
         """
         Initialize Nitter scraper
@@ -50,14 +53,18 @@ class NitterScraper:
         self.timeout = timeout
         self.current_instance_index = 0
         self.session = requests.Session()
-        self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        })
+        self._rng = random.Random()
+        self._header_pool = self._build_header_pool()
+        initial_headers = self._pick_header_fingerprint()
+        logger.debug("Initial Nitter headers: %s", initial_headers)
+        self.session.headers.update(initial_headers)
         self.available_instances = list(self.NITTER_INSTANCES)
         self._instance_cooldown_until: Dict[str, float] = {}
         self._degraded_instances: Dict[str, float] = {}
         self._health_cache: Dict[str, Dict[str, Any]] = {}
         self._last_health_check: Optional[float] = None
+        self._last_global_outage: float = initial_outage_timestamp or 0.0
+        self.block_history = block_history
         self.health_check_username = health_check_username or self.DEFAULT_HEALTH_CHECK_USER
 
         if eager_instance_check:
@@ -92,6 +99,7 @@ class NitterScraper:
             logger.warning(f"All Nitter instances currently degraded: {degraded_list}")
         else:
             logger.warning("All Nitter instances are temporarily unavailable.")
+        self._last_global_outage = now
 
         return None
     
@@ -184,10 +192,20 @@ class NitterScraper:
                 break
             
             try:
-                logger.info(f"📥 Fetching tweets from @{username} via {instance} (attempt {attempt + 1}/{max_retries})")
-                
+                headers = self._pick_header_fingerprint()
                 url = f"{instance}/{username}"
-                response = self.session.get(url, timeout=self.timeout)
+                delay = self._apply_jitter("nitter", url)
+                logger.info(
+                    "📥 Fetching tweets from @%s via %s (attempt %s/%s, sleep %.2fs)",
+                    username,
+                    instance,
+                    attempt + 1,
+                    max_retries,
+                    delay
+                )
+
+                logger.debug("Nitter headers for this request: %s", headers)
+                response = self.session.get(url, headers=headers, timeout=self.timeout)
                 response.raise_for_status()
                 
                 # Parse HTML
@@ -334,6 +352,8 @@ class NitterScraper:
         if instance in self._degraded_instances:
             logger.info(f"✅ {instance} recovered from degraded state")
         self._degraded_instances.pop(instance, None)
+        if not self._degraded_instances:
+            self._last_global_outage = 0.0
         self._health_cache[instance] = {
             "is_up": True,
             "checked_at": datetime.now(UTC).isoformat(),
@@ -349,11 +369,20 @@ class NitterScraper:
         self._instance_cooldown_until[instance] = cooldown_until
         self._degraded_instances[instance] = cooldown_until
 
+        truncated_reason = reason[:120] if reason else "unknown error"
         if previous <= now:
-            truncated_reason = reason[:120] if reason else "unknown error"
             logger.warning(
                 f"⚠️  Marking {instance} as degraded for {self.INSTANCE_COOLDOWN_SECONDS}s ({truncated_reason})"
             )
+        if len(self._degraded_instances) >= len(self.available_instances):
+            previous_outage = self._last_global_outage
+            self._last_global_outage = now
+            should_record = not previous_outage or (now - previous_outage) > 1
+            if should_record:
+                self._record_block_event(
+                    reason=truncated_reason,
+                    metadata={"instance": instance}
+                )
 
         self._health_cache[instance] = {
             "is_up": False,
@@ -375,7 +404,91 @@ class NitterScraper:
             degraded.append(instance)
 
         degraded.sort()
+        if not degraded and self._last_global_outage and (time.time() - self._last_global_outage) > self.INSTANCE_COOLDOWN_SECONDS:
+            self._last_global_outage = 0.0
         return degraded
+
+    def _build_header_pool(self) -> List[Dict[str, str]]:
+        user_agents = [
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_2) AppleWebKit/605.1.15 "
+            "(KHTML, like Gecko) Version/17.1 Safari/605.1.15",
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (iPad; CPU OS 16_4 like Mac OS X) AppleWebKit/605.1.15 "
+            "(KHTML, like Gecko) Version/16.4 Mobile/15E148 Safari/604.1",
+        ]
+
+        accept_languages = [
+            "en-US,en;q=0.8",
+            "en-GB,en;q=0.7,de;q=0.5",
+            "de-DE,de;q=0.9,en;q=0.6",
+        ]
+
+        accept_headers = [
+            "text/html,application/xhtml+xml,application/xml;q=0.9, */*;q=0.8",
+            "text/html,application/json;q=0.9, */*;q=0.7",
+        ]
+
+        pool: List[Dict[str, str]] = []
+        for ua in user_agents:
+            for lang in accept_languages:
+                for accept in accept_headers:
+                    pool.append({
+                        "User-Agent": ua,
+                        "Accept": accept,
+                        "Accept-Language": lang,
+                        "Accept-Encoding": "gzip, deflate, br",
+                        "Connection": "keep-alive",
+                        "DNT": "1",
+                        "Upgrade-Insecure-Requests": "1",
+                    })
+        return pool
+
+    def _pick_header_fingerprint(self) -> Dict[str, str]:
+        if not self._header_pool:
+            self._header_pool = self._build_header_pool()
+        return dict(self._rng.choice(self._header_pool))
+
+    def _apply_jitter(self, label: str, url: str) -> float:
+        delay = round(self._rng.uniform(0.2, 1.0), 3)
+        logger.debug("Sleep %.3fs before %s request to %s", delay, label, url)
+        time.sleep(delay)
+        return delay
+
+    def _record_block_event(self, reason: str, metadata: Optional[Dict[str, Any]] = None) -> None:
+        if not getattr(self, "block_history", None):
+            return
+
+        payload = {
+            "active_instances": len(self._degraded_instances),
+            "total_instances": len(self.available_instances),
+        }
+        if metadata:
+            payload.update(metadata)
+
+        try:
+            self.block_history.record_event(
+                source="nitter",
+                reason=reason,
+                metadata=payload,
+            )
+        except Exception as exc:
+            logger.debug("Failed to persist Nitter block event: %s", exc)
+
+    def has_recent_outage(self, window_seconds: int = 900) -> bool:
+        """Return True if all instances were recently degraded."""
+        if not self._last_global_outage:
+            return False
+        return (time.time() - self._last_global_outage) <= window_seconds
+
+    def set_block_history_repo(self, repo) -> None:
+        self.block_history = repo
+
+    def set_last_global_outage(self, timestamp: Optional[float]) -> None:
+        if timestamp is not None:
+            self._last_global_outage = timestamp
 
     def run_health_check(
         self,
@@ -411,7 +524,13 @@ class NitterScraper:
         for instance in self.NITTER_INSTANCES:
             start = time.time()
             try:
-                response = self.session.get(f"{instance}/{target_user}", timeout=timeout)
+                headers = self._pick_header_fingerprint()
+                self._apply_jitter("nitter_health", instance)
+                response = self.session.get(
+                    f"{instance}/{target_user}",
+                    headers=headers,
+                    timeout=timeout
+                )
                 latency_ms = (time.time() - start) * 1000
                 is_up = response.status_code == 200
                 status_info = {
