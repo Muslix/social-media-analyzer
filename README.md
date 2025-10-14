@@ -102,8 +102,10 @@ python main.py
 Required environment variables in `.env`:
 
 ```env
-# Truth Social Account (optional - configure any account to monitor)
-TRUTH_USERNAME=your_account_to_monitor
+# Truth Social Accounts (optional - comma-separated without @)
+TRUTH_USERNAMES=your_account_to_monitor
+# Legacy single-account fallback (leave empty if using TRUTH_USERNAMES)
+TRUTH_USERNAME=
 
 # X/Twitter Accounts (optional - via Nitter scraping, no API key needed)
 X_ENABLED=true
@@ -134,7 +136,7 @@ REPEAT_MAX_DELAY=840
 BLOCKED_BACKOFF_MIN=900
 BLOCKED_BACKOFF_MAX=1500
 EMPTY_FETCH_THRESHOLD=3
-EMPTY_FETCH_BACKOFF_MULTIPLIER=1.5
+EMPTY_FETCH_BACKOFF_MULTIPLIER=1.8
 
 # FlareSolverr (enables Cloudflare-friendly requests)
 FLARESOLVERR_ENABLED=true
@@ -150,17 +152,33 @@ X_ACCOUNT_LOCATIONS=
 # Discord (optional)
 DISCORD_NOTIFY=true
 DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/YOUR_WEBHOOK
+DISCORD_ALL_POSTS_WEBHOOK=https://discord.com/api/webhooks/YOUR_LOW_PRIORITY_WEBHOOK
+DISCORD_ALL_POSTS_USERNAME=Posted But Not Relevant
 
 # Ollama
 OLLAMA_MODEL=llama3.2:3b
 OLLAMA_NUM_THREADS=8  # Set to CPU core count (use 'nproc')
 # Optional when running in Docker: override container access to host Ollama
 # DOCKER_OLLAMA_URL=http://host.docker.internal:11434
+
+# OpenRouter (optional remote LLM provider)
+OPENROUTER_ENABLED=false
+OPENROUTER_API_KEY=
+OPENROUTER_MODEL=openai/gpt-oss-20b:free
+OPENROUTER_URL=https://openrouter.ai/api/v1/chat/completions
+OPENROUTER_TIMEOUT=120
+OPENROUTER_MIN_INTERVAL=6
+# Optional branding headers for OpenRouter requests
+OPENROUTER_REFERER=
+OPENROUTER_TITLE=
 ```
 
 **Note:** Either Truth Social (`TRUTH_USERNAMES`) OR X/Twitter (`X_ENABLED=true`) must be configured. You can enable both for multi-platform monitoring. Each platform supports **multiple accounts** (comma-separated).
 
-See `.env.example` for all options.
+See `.env.example` for all options, including quiet hour location mappings and webhook overrides.
+- `DISCORD_ALL_POSTS_WEBHOOK` / `DISCORD_ALL_POSTS_USERNAME` deliver every filtered post to a separate Discord channel without interrupting high-priority alerts.
+- `TRUTH_ACCOUNT_LOCATIONS` and `X_ACCOUNT_LOCATIONS` map monitored accounts to quiet-hour regions (formatted as `account:LABEL`).
+- `OPENROUTER_*` variables enable remote LLM inference via [OpenRouter](https://openrouter.ai) with customizable model, rate limiting, and attribution metadata.
 
 ## Makefile Commands
 
