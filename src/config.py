@@ -20,6 +20,40 @@ def _parse_account_locations(raw: str) -> Dict[str, str]:
     return mapping
 
 
+def _parse_mapping(
+    raw: str,
+    *,
+    key_transform=None,
+    value_transform=None,
+) -> Dict[str, str]:
+    """
+    Parse generic string mapping (e.g. "btc:bitcoin,eth:ethereum") into a dict.
+    Allows optional transforms for keys and values.
+    """
+    if key_transform is None:
+        key_transform = lambda x: x.strip().lower()
+    if value_transform is None:
+        value_transform = lambda x: x.strip()
+
+    mapping: Dict[str, str] = {}
+    if not raw:
+        return mapping
+
+    for chunk in raw.split(','):
+        chunk = chunk.strip()
+        if not chunk or ':' not in chunk:
+            logging.warning("Skipping invalid mapping entry: %s", chunk)
+            continue
+        key, value = chunk.split(':', 1)
+        key = key_transform(key)
+        value = value_transform(value)
+        if key and value:
+            mapping[key] = value
+        else:
+            logging.warning("Skipping incomplete mapping entry: %s", chunk)
+    return mapping
+
+
 def _parse_quiet_hours(raw: str) -> Dict[str, Dict[str, List[Tuple[str, str]]]]:
     """
     Parse quiet hours string (e.g., "US|America/New_York|00:00-06:00,22:00-23:00;EU|Europe/Berlin|02:00-05:00")
@@ -111,6 +145,8 @@ class Config(object):
     DISCORD_ALL_POSTS_WEBHOOK = os.getenv("DISCORD_ALL_POSTS_WEBHOOK")
     DISCORD_ALL_POSTS_USERNAME = os.getenv("DISCORD_ALL_POSTS_USERNAME") or "Posted But Not Relevant"
     LLM_ERROR_WEBHOOK_URL = os.getenv("LLM_ERROR_WEBHOOK_URL")
+    DISCORD_FAILURE_WEBHOOK = os.getenv("DISCORD_FAILURE_WEBHOOK")
+    DISCORD_FAILURE_USERNAME = os.getenv("DISCORD_FAILURE_USERNAME") or "Something Failed"
     
     # MongoDB configuration
     MONGO_DBSTRING = os.getenv("MONGO_DBSTRING")
@@ -119,6 +155,17 @@ class Config(object):
     MONGO_ANALYSIS_COLLECTION = os.getenv("MONGO_ANALYSIS_COLLECTION") or "analysis_results"
     MONGO_BLOCK_HISTORY_COLLECTION = os.getenv("MONGO_BLOCK_HISTORY_COLLECTION") or "scraper_block_history"
     ENABLE_FILE_EXPORT = os.getenv("ENABLE_FILE_EXPORT", 'false').lower() == 'true'
+
+    # Market impact tracking
+    MARKET_IMPACT_ENABLED = os.getenv("MARKET_IMPACT_ENABLED", "false").lower() == "true"
+    MARKET_IMPACT_COLLECTION = os.getenv("MARKET_IMPACT_COLLECTION") or "market_impact_snapshots"
+    MARKET_IMPACT_CRYPTO_IDS = _parse_mapping(os.getenv("MARKET_IMPACT_CRYPTO_IDS", "btc:bitcoin,eth:ethereum,ada:cardano,sol:solana"))
+    MARKET_IMPACT_INDEX_IDS = _parse_mapping(
+        os.getenv("MARKET_IMPACT_INDEX_IDS", "dow:^dji,dax:^gdaxi"),
+        key_transform=lambda x: x.strip().lower(),
+        value_transform=lambda x: x.strip(),
+    )
+    MARKET_IMPACT_FIAT = (os.getenv("MARKET_IMPACT_FIAT") or "usd").strip().lower()
 
     # Truth Social configuration
     TRUTH_USERNAMES = [u.strip() for u in os.getenv("TRUTH_USERNAMES", '').split(',') if u.strip()]

@@ -23,6 +23,12 @@ from src.services.post_processing_pipeline import PostProcessingPipeline
 from src.services.quiet_hours import QuietHoursManager
 from src.services.block_history import BlockHistoryRepository
 from src.services.interval_controller import IntervalController
+from src.services.market_impact_tracker import (
+    MarketImpactTracker,
+    CoinGeckoCryptoProvider,
+    StooqIndexProvider,
+    MarketImpactRepository,
+)
 from src.enums import PostStatus, MediaType, Platform
 
 # Configure logging
@@ -40,6 +46,7 @@ llm_analyzer = LLMAnalyzer(config=config)  # Always initialize LLM analyzer for 
 output_formatter = None  # Will be initialized after database connection
 discord_notifier = DiscordNotifier(config.DISCORD_WEBHOOK_URL, username="🚨 Market Impact Bot") if config.DISCORD_NOTIFY else None
 discord_all_posts_notifier = DiscordNotifier(config.DISCORD_ALL_POSTS_WEBHOOK, username=config.DISCORD_ALL_POSTS_USERNAME) if config.DISCORD_ALL_POSTS_WEBHOOK else None
+discord_failure_notifier = DiscordNotifier(config.DISCORD_FAILURE_WEBHOOK, username=config.DISCORD_FAILURE_USERNAME) if config.DISCORD_FAILURE_WEBHOOK else None
 nitter_scraper = NitterScraper() if config.X_ENABLED else None
 
 # Initialize Truth Social scraper (optional FlareSolverr support)
@@ -91,13 +98,15 @@ def connect_mongodb():
         posts_collection = db[config.MONGO_COLLECTION]
         analysis_collection = db[config.MONGO_ANALYSIS_COLLECTION]
         block_history_collection = db[config.MONGO_BLOCK_HISTORY_COLLECTION]
+        market_impact_collection = db[config.MARKET_IMPACT_COLLECTION]
         logger.info(
-            "Successfully connected to MongoDB (posts: %s, analysis: %s, block_history: %s)",
+            "Successfully connected to MongoDB (posts: %s, analysis: %s, block_history: %s, market_impact: %s)",
             config.MONGO_COLLECTION,
             config.MONGO_ANALYSIS_COLLECTION,
             config.MONGO_BLOCK_HISTORY_COLLECTION,
+            config.MARKET_IMPACT_COLLECTION,
         )
-        return posts_collection, analysis_collection, block_history_collection
+        return posts_collection, analysis_collection, block_history_collection, market_impact_collection
     except Exception as e:
         logger.error(f"Failed to connect to MongoDB: {e}")
         # Check for SSL handshake/network policy errors
@@ -342,13 +351,23 @@ def collect_posts() -> List[Dict[str, Any]]:
         rss_items, rss_meta = get_rss_posts()
         all_posts.extend(rss_items)
 
+    def _format_skip_entry(item: Dict[str, Any]) -> str:
+        """Format a skipped entry for logging without assuming specific keys."""
+        if "username" in item and item["username"]:
+            identifier = f"@{item['username']}"
+        elif "feed" in item and item["feed"]:
+            identifier = item["feed"]
+        else:
+            identifier = item.get("label") or item.get("id") or "unknown"
+
+        location = item.get("location") or "N/A"
+        resume_at = item.get("resume_at", "later")
+        return f"{identifier} ({location} → {resume_at})"
+
     def _log_quiet(platform: str, meta: Dict[str, Any]):
         if not meta.get("skipped"):
             return
-        details = ", ".join(
-            f"@{item['username']} ({item.get('location') or 'N/A'} → {item.get('resume_at', 'later')})"
-            for item in meta["skipped"]
-        )
+        details = ", ".join(_format_skip_entry(item) for item in meta["skipped"])
         logger.info("⏸️ Quiet hours (%s): %s", platform, details)
 
     _log_quiet("Truth Social", truth_meta)
@@ -436,7 +455,12 @@ def main():
     
     # Connect to MongoDB
     try:
-        posts_collection, analysis_collection, block_history_collection = connect_mongodb()
+        (
+            posts_collection,
+            analysis_collection,
+            block_history_collection,
+            market_impact_collection,
+        ) = connect_mongodb()
     except Exception as e:
         logger.error(f"Failed to connect to MongoDB in main: {e}")
         if (
@@ -476,6 +500,48 @@ def main():
         enable_file_export=config.ENABLE_FILE_EXPORT
     )
 
+    market_impact_repository = MarketImpactRepository(market_impact_collection)
+    crypto_symbols = [symbol.lower() for symbol in config.MARKET_IMPACT_CRYPTO_IDS.keys()]
+    index_symbols = [symbol.lower() for symbol in config.MARKET_IMPACT_INDEX_IDS.keys()]
+
+    crypto_provider = None
+    if crypto_symbols:
+        crypto_provider = CoinGeckoCryptoProvider(
+            id_map=config.MARKET_IMPACT_CRYPTO_IDS,
+            vs_currency=config.MARKET_IMPACT_FIAT,
+        )
+
+    index_provider = None
+    if index_symbols:
+        index_currency_map: Dict[str, str] = {}
+        for key in index_symbols:
+            if "dow" in key or "dji" in key:
+                index_currency_map[key] = "usd"
+            elif "dax" in key or "gda" in key or "ger" in key:
+                index_currency_map[key] = "eur"
+        index_provider = StooqIndexProvider(
+            symbol_map=config.MARKET_IMPACT_INDEX_IDS,
+            currency_map=index_currency_map,
+        )
+
+    market_impact_tracker = None
+    if config.MARKET_IMPACT_ENABLED and (crypto_symbols or index_symbols):
+        market_impact_tracker = MarketImpactTracker(
+            repository=market_impact_repository,
+            crypto_provider=crypto_provider,
+            index_provider=index_provider,
+            enabled=True,
+            crypto_symbols=crypto_symbols,
+            index_symbols=index_symbols,
+        )
+        logger.info(
+            "Market impact tracker enabled (crypto assets: %s, indices: %s)",
+            ", ".join(crypto_symbols) or "none",
+            ", ".join(index_symbols) or "none",
+        )
+    else:
+        logger.info("Market impact tracker disabled or no assets configured.")
+
     pipeline = PostProcessingPipeline(
         config=config,
         market_analyzer=market_analyzer,
@@ -487,6 +553,8 @@ def main():
         discord_threshold=DISCORD_ALERT_THRESHOLD,
         is_processed_fn=is_post_processed,
         mark_processed_fn=mark_post_processed,
+        market_impact_tracker=market_impact_tracker,
+        failure_notifier=discord_failure_notifier,
     )
     interval_controller = IntervalController(config)
     consecutive_empty_cycles = 0
@@ -509,7 +577,20 @@ def main():
                     "MongoDB connection failed due to SSL/network error. "
                     "Reminder: Check your MongoDB Atlas Network Access Policy, firewall, and IP whitelist settings."
                 )
+            if discord_failure_notifier:
+                details = {
+                    "error": str(e),
+                    "cycle_time": datetime.now(UTC).isoformat(),
+                }
+                discord_failure_notifier.send_failure_alert(
+                    "Main Loop Fehler",
+                    "Beim Sammeln oder Verarbeiten der Posts ist ein Fehler aufgetreten.",
+                    details=details,
+                )
         finally:
+            if market_impact_tracker:
+                market_impact_tracker.run_pending()
+
             if posts:
                 consecutive_empty_cycles = 0
             else:

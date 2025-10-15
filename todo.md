@@ -28,3 +28,20 @@
 │  Keywords → spaCy NER → Ollama (Fallback)      │
 │  Schnell, präzise, kosteneffizient!            │
 └─────────────────────────────────────────────────┘
+
+                     ↓
+┌─────────────────────────────────────────────────┐
+│  NEXT: EVENT IMPACT TRACKING                   │
+├─────────────────────────────────────────────────┤
+│  ✓ Crypto Impact Probe: BTC/ETH/ADA/SOL Preise │
+│     • Trigger bei LLM-Events (urgency: hours/   │
+│       immediate)                                │
+│     • Immediate: Preise alle 10 min für 6 h     │
+│     • Hours: Preise alle 20 min für 24 h        │
+│     • Daten mit Event-ID verknüpfen             │
+│  ✓ Optional: Dow Jones, DAX als Vergleich       │
+│  ✓ API/Collector-Skeleton + Persistenz planen   │
+│  ▢ Analyse-Skripte für Impact-Auswertung bauen  │
+│  ▢ Dashboards/Reports für Event-Outcome         │
+│  ▢ Alerting/Review-Workflow für Impact-Daten    │
+└─────────────────────────────────────────────────┘

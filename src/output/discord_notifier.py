@@ -4,7 +4,7 @@ Sends beautifully formatted embeds to Discord
 """
 import logging
 import requests
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Any
 from datetime import datetime, UTC
 
 logger = logging.getLogger(__name__)
@@ -376,6 +376,50 @@ class DiscordNotifier:
             logger.error(f"❌ Failed to send test message: {e}")
             return False
 
+    def send_failure_alert(
+        self,
+        title: str,
+        description: str,
+        *,
+        details: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """Send a failure notification embed."""
+        if not self.webhook_url:
+            return False
+
+        embed = {
+            "title": f"❌ {title}",
+            "description": description[:1800],
+            "color": 0xFF0000,
+            "timestamp": datetime.now(UTC).isoformat(),
+        }
+
+        if details:
+            fields: List[Dict[str, str]] = []
+            for key, value in details.items():
+                if value is None:
+                    continue
+                fields.append({
+                    "name": str(key)[:256],
+                    "value": str(value)[:1024],
+                    "inline": False,
+                })
+            if fields:
+                embed["fields"] = fields[:10]
+
+        payload = {
+            "username": self.username,
+            "embeds": [embed],
+        }
+
+        try:
+            response = requests.post(self.webhook_url, json=payload, timeout=10)
+            response.raise_for_status()
+            logger.info("📣 Failure notification sent to Discord")
+            return True
+        except requests.exceptions.RequestException as exc:
+            logger.error("Failed to send failure notification: %s", exc)
+            return False
 
 if __name__ == "__main__":
     # Test the Discord notifier

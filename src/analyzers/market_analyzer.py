@@ -2,8 +2,9 @@
 Advanced Market Impact Analyzer
 Analyzes social media posts for potential market impact using multiple techniques
 """
+import math
 import re
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 # Import comprehensive keyword database
 from src.data.keywords import (
@@ -53,9 +54,10 @@ class MarketImpactAnalyzer:
         analysis_details = {}
         
         # 1. Keyword-based scoring
-        keyword_score, found_keywords = self._analyze_keywords(text_lower)
+        keyword_score, found_keywords, keyword_meta = self._analyze_keywords(text_lower)
         total_score += keyword_score
         analysis_details['keywords'] = found_keywords
+        analysis_details['keyword_meta'] = keyword_meta
         
         # 2. Percentage and numeric pattern analysis
         percentage_score, percentage_data = self._analyze_percentages(text)
@@ -108,23 +110,70 @@ class MarketImpactAnalyzer:
             'summary': f"{impact_level.alert_emoji} {impact_level.label} - Score: {total_score}"
         }
     
-    def _analyze_keywords(self, text: str) -> Tuple[int, Dict]:
-        """Analyze weighted keywords with whole-word matching"""
-        score = 0
-        found = {}
+    def _analyze_keywords(self, text: str) -> Tuple[int, Dict[str, List[Tuple[str, int]]], Dict[str, Any]]:
+        """Analyze weighted keywords with whole-word matching and length-aware normalization."""
+        raw_score = 0
+        found: Dict[str, List[Tuple[str, int]]] = {}
+        unique_keywords_matched = 0
+        keyword_occurrences = 0
         
         for category, keywords in self.weighted_keywords.items():
             for keyword, weight in keywords.items():
                 # Use word boundaries to match whole words only
                 # \b ensures 'war' matches in 'trade war' but NOT in 'software'
                 pattern = r'\b' + re.escape(keyword) + r'\b'
-                if re.search(pattern, text, re.IGNORECASE):
+                matches = re.findall(pattern, text, re.IGNORECASE)
+                if matches:
                     if category not in found:
                         found[category] = []
                     found[category].append((keyword, weight))
-                    score += weight
+                    raw_score += weight
+                    unique_keywords_matched += 1
+                    keyword_occurrences += len(matches)
+
+        # Normalize score for extremely long texts so keyword density matters more than raw length.
+        word_count = max(len(re.findall(r'\w+', text)), 1)
+        baseline_words = 250  # No penalty up to this length
+        min_length_factor = 0.35  # Prevent over-penalizing even very long posts
+
+        if word_count <= baseline_words or raw_score == 0:
+            length_factor = 1.0
+        else:
+            length_factor = math.sqrt(baseline_words / word_count)
+            length_factor = max(min_length_factor, min(length_factor, 1.0))
+
+        # Additional density-based dampening: plenty of keywords across very few words keeps the score high,
+        # while sparse keywords across thousands of words get scaled down further.
+        keywords_per_100_words = (
+            (keyword_occurrences * 100.0) / word_count if keyword_occurrences else 0.0
+        )
+        baseline_density = 6.0  # Expect ~6 impactful matches per 100 words to keep full weight
+        if keyword_occurrences == 0:
+            density_factor = 1.0
+        else:
+            density_factor = min(1.0, keywords_per_100_words / baseline_density)
+
+        # Combine factors; allow the combined factor to drop lower than the standalone length floor,
+        # but never let it reach zero if we actually matched keywords.
+        combined_factor = max(0.2, length_factor * density_factor) if raw_score > 0 else 0
+
+        adjusted_score = int(round(raw_score * combined_factor))
+
+        meta = {
+            "raw_score": raw_score,
+            "adjusted_score": adjusted_score,
+            "word_count": word_count,
+            "baseline_words": baseline_words,
+            "length_factor": length_factor,
+            "density_factor": density_factor,
+            "combined_factor": combined_factor,
+            "unique_keywords_matched": unique_keywords_matched,
+            "keyword_occurrences": keyword_occurrences,
+            "keywords_per_100_words": keywords_per_100_words,
+            "baseline_density": baseline_density,
+        }
         
-        return score, found
+        return adjusted_score, found, meta
     
     def _analyze_percentages(self, text: str) -> Tuple[int, Dict]:
         """

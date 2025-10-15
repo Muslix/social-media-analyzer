@@ -28,6 +28,8 @@ class PostProcessingPipeline:
         discord_threshold: int,
         is_processed_fn: Callable[[Any, str], bool],
         mark_processed_fn: Callable[[Any, Dict[str, Any]], None],
+        market_impact_tracker=None,
+        failure_notifier=None,
     ) -> None:
         self.config = config
         self.market_analyzer = market_analyzer
@@ -39,6 +41,8 @@ class PostProcessingPipeline:
         self.discord_threshold = discord_threshold
         self.is_processed_fn = is_processed_fn
         self.mark_processed_fn = mark_processed_fn
+        self.market_impact_tracker = market_impact_tracker
+        self.failure_notifier = failure_notifier
 
     def process_posts(self, posts: List[Dict[str, Any]], mongo_collection) -> None:
         for post in sorted(posts, key=lambda x: x.get('created_at', '')):
@@ -47,6 +51,16 @@ class PostProcessingPipeline:
             except Exception as exc:
                 post_id = post.get('id', 'unknown') if isinstance(post, dict) else 'unknown'
                 logger.error(f"Failed to process post {post_id}: {exc}")
+                self._notify_failure(
+                    title="Post processing fehlgeschlagen",
+                    description=f"Fehler beim Verarbeiten von Post {post_id}",
+                    details={
+                        "post_id": post_id,
+                        "error": str(exc),
+                        "platform": post.get('platform') if isinstance(post, dict) else None,
+                        "created_at": post.get('created_at') if isinstance(post, dict) else None,
+                    },
+                )
 
     def _process_single_post(self, post: Dict[str, Any], mongo_collection) -> None:
         if not isinstance(post, dict) or 'id' not in post:
@@ -139,6 +153,22 @@ class PostProcessingPipeline:
             created_at=created_at,
         )
 
+        if self.market_impact_tracker and llm_analysis:
+            post_metadata = {
+                "platform": platform.value,
+                "platform_emoji": platform.emoji,
+                "post_url": post_url,
+                "username": username,
+                "display_name": display_name,
+                "post_created_at": created_at.isoformat(),
+            }
+            self.market_impact_tracker.handle_analysis_event(
+                event_id=post['id'],
+                llm_analysis=llm_analysis,
+                market_analysis=market_analysis,
+                post_metadata=post_metadata,
+            )
+
         if (
             self.discord_all_posts_notifier
             and market_analysis
@@ -179,9 +209,17 @@ class PostProcessingPipeline:
                 logger.warning(
                     "⚠️  Skipping Discord alert for high-impact post due to failed LLM analysis (keyword score: %s)",
                     market_analysis['impact_score']
-                )
+            )
 
         self.mark_processed_fn(mongo_collection, post)
+
+    def _notify_failure(self, *, title: str, description: str, details: Optional[Dict[str, Any]] = None) -> None:
+        if not self.failure_notifier:
+            return
+        try:
+            self.failure_notifier.send_failure_alert(title, description, details=details)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.error("Failed to send failure notification: %s", exc)
 
     def _apply_quality_check(self, cleaned_content: str, llm_analysis: Dict[str, Any], market_analysis: Dict[str, Any]) -> None:
         original_reasoning = llm_analysis.get('reasoning')

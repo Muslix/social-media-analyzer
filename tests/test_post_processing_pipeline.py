@@ -18,6 +18,8 @@ def make_pipeline(**overrides):
     discord_all_posts_notifier = overrides.get("discord_all_posts_notifier", MagicMock())
     is_processed_fn = overrides.get("is_processed_fn", MagicMock(return_value=False))
     mark_processed_fn = overrides.get("mark_processed_fn", MagicMock())
+    market_impact_tracker = overrides.get("market_impact_tracker")
+    failure_notifier = overrides.get("failure_notifier", MagicMock())
 
     pipeline = SimpleNamespace(
         pipeline=PostProcessingPipeline(
@@ -31,6 +33,8 @@ def make_pipeline(**overrides):
             discord_threshold=25,
             is_processed_fn=is_processed_fn,
             mark_processed_fn=mark_processed_fn,
+            market_impact_tracker=market_impact_tracker,
+            failure_notifier=failure_notifier,
         ),
         config=config,
         market_analyzer=market_analyzer,
@@ -40,6 +44,8 @@ def make_pipeline(**overrides):
         discord_all_posts_notifier=discord_all_posts_notifier,
         is_processed_fn=is_processed_fn,
         mark_processed_fn=mark_processed_fn,
+        market_impact_tracker=market_impact_tracker,
+        failure_notifier=failure_notifier,
     )
     return pipeline
 
@@ -85,3 +91,46 @@ def test_discord_notifier_receives_post_url():
     ctx.discord_all_posts_notifier.send_market_alert.assert_called_once()
     args, kwargs = ctx.discord_all_posts_notifier.send_market_alert.call_args
     assert kwargs["post_url"] == "https://example.com/article"
+
+
+def test_market_impact_tracker_receives_high_urgency_events():
+    tracker = MagicMock()
+    ctx = make_pipeline(market_impact_tracker=tracker)
+
+    market_analysis = {
+        "impact_level": "🔴 CRITICAL",
+        "impact_score": 40,
+        "alert_emoji": "🔴",
+        "details": {},
+        "summary": "Critical impact"
+    }
+    ctx.market_analyzer.analyze.return_value = market_analysis
+
+    llm_result = {
+        "score": 85,
+        "urgency": "immediate",
+        "reasoning": "Immediate market move expected",
+        "processing_time_seconds": 1.5,
+    }
+    ctx.llm_analyzer.analyze.return_value = llm_result
+    ctx.llm_analyzer.quality_check_analysis.return_value = {"approved": True}
+
+    post = sample_post(id="post_impact")
+    ctx.pipeline.process_posts([post], mongo_collection=MagicMock())
+
+    tracker.handle_analysis_event.assert_called_once()
+    kwargs = tracker.handle_analysis_event.call_args.kwargs
+    assert kwargs["event_id"] == "post_impact"
+    assert kwargs["llm_analysis"]["urgency"] == "immediate"
+
+
+def test_failure_notifier_gets_called_on_exception():
+    failure_notifier = MagicMock()
+    ctx = make_pipeline(failure_notifier=failure_notifier)
+
+    ctx.market_analyzer.analyze.side_effect = RuntimeError("boom")
+
+    post = sample_post(id="post_fail")
+    ctx.pipeline.process_posts([post], mongo_collection=MagicMock())
+
+    failure_notifier.send_failure_alert.assert_called_once()

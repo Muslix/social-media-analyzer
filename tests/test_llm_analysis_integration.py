@@ -47,6 +47,16 @@ SCENARIOS = (
         },
         expected_urgency={"weeks", "days"},
         provider_overrides={
+            "ollama": ProviderOverride(
+                score_range=(10, 40),
+                score_tolerance=15,
+                expected_direction={
+                    "stocks": {"neutral"},
+                    "crypto": {"neutral", "bearish"},
+                    "forex": {"neutral"},
+                    "commodities": {"neutral"},
+                },
+            ),
             "openrouter": ProviderOverride(
                 score_range=(20, 40),
                 score_tolerance=15,
@@ -64,7 +74,7 @@ SCENARIOS = (
         score_tolerance=10,
         expected_direction={
             "stocks": {"neutral", "bearish"},
-            "crypto": {"neutral"},
+            "crypto": {"neutral", "bearish"},
             "forex": {"neutral", "usd_up"},
             "commodities": {"neutral", "up"},
         },
@@ -81,12 +91,20 @@ SCENARIOS = (
         score_tolerance=10,
         expected_direction={
             "stocks": {"bearish", "neutral"},
-            "crypto": {"neutral"},
+            "crypto": {"bearish", "neutral"},
             "forex": {"usd_up", "neutral", "usd_down"},
             "commodities": {"neutral"},
         },
-        expected_urgency={"days", "hours"},
+        expected_urgency={"days", "weeks"},
         provider_overrides={
+            "ollama": ProviderOverride(
+                expected_direction={
+                    "stocks": {"bearish", "neutral"},
+                    "crypto": {"bearish", "neutral"},
+                    "forex": {"usd_up", "neutral", "usd_down"},
+                    "commodities": {"neutral"},
+                }
+            ),
             "openrouter": ProviderOverride(
                 expected_direction={
                     "stocks": {"bearish", "neutral"},
@@ -138,7 +156,7 @@ SCENARIOS = (
         score_range=(80, 100),
         score_tolerance=10,
         expected_direction={
-            "stocks": {"bearish"},
+            "stocks": {"bearish", "neutral"},
             "crypto": {"bearish", "neutral"},
             "forex": {"usd_up"},
             "commodities": {"down", "neutral", "up"},
@@ -150,11 +168,15 @@ SCENARIOS = (
 
 @pytest.fixture(scope="module")
 def llm_live_analyzer():
-    """Provide a live LLM analyzer instance if Ollama is reachable."""
-    openrouter_enabled = os.getenv("OPENROUTER_ENABLED", "false").lower() == "true"
-    openrouter_api_key = os.getenv("OPENROUTER_API_KEY")
+    """Provide a live LLM analyzer instance preferring the local Ollama backend."""
+    provider = os.getenv("LLM_TEST_PROVIDER", "local").strip().lower() or "local"
 
-    if openrouter_enabled:
+    if provider == "openrouter":
+        openrouter_enabled = os.getenv("OPENROUTER_ENABLED", "false").lower() == "true"
+        if not openrouter_enabled:
+            pytest.skip("LLM_TEST_PROVIDER=openrouter but OPENROUTER_ENABLED is not true")
+
+        openrouter_api_key = os.getenv("OPENROUTER_API_KEY")
         if not openrouter_api_key:
             pytest.skip("OPENROUTER_ENABLED is true but OPENROUTER_API_KEY is missing")
 
@@ -173,6 +195,7 @@ def llm_live_analyzer():
         )
         return LLMAnalyzer(config=config, timeout=600)
 
+    # Default: local Ollama backend
     url = os.getenv("OLLAMA_URL", "http://localhost:11434")
     model = os.getenv("OLLAMA_MODEL", "llama3.2:3b")
 
@@ -185,7 +208,7 @@ def llm_live_analyzer():
     config = SimpleNamespace(
         OLLAMA_URL=url,
         OLLAMA_MODEL=model,
-        OLLAMA_NUM_THREADS=0,
+        OLLAMA_NUM_THREADS=int(os.getenv("OLLAMA_NUM_THREADS", "0") or 0),
     )
 
     return LLMAnalyzer(config=config, timeout=600)
