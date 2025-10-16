@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import csv
+import json
 import logging
+import os
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, UTC
@@ -10,6 +12,14 @@ from io import StringIO
 from typing import Any, Callable, Dict, List, Optional, Protocol
 
 import requests
+
+from src.services.impact_analysis_engine import ImpactAnalysisEngine
+from src.utils.rate_limiter import RateLimiter
+
+try:
+    from pycoingecko import CoinGeckoAPI
+except ImportError:  # pragma: no cover - optional dependency
+    CoinGeckoAPI = None
 
 logger = logging.getLogger(__name__)
 
@@ -26,16 +36,27 @@ class PriceProvider(Protocol):
 
 
 class MarketImpactRepository:
-    """Persist market impact snapshots to MongoDB (with in-memory fallback)."""
+    """Persist market impact snapshots to MongoDB (with file + in-memory fallback)."""
 
-    def __init__(self, collection=None) -> None:
-        self.collection = collection
-        self._memory: List[Dict[str, Any]] = []
+    DEFAULT_JSONL_PATH = os.path.join("training_data", "market_impact_data.jsonl")
+
+    def __init__(
+        self,
+        snapshot_collection=None,
+        analysis_collection=None,
+        jsonl_path: Optional[str] = DEFAULT_JSONL_PATH,
+    ) -> None:
+        self.collection = snapshot_collection
+        self.analysis_collection = analysis_collection or snapshot_collection
+        self._memory_snapshots: List[Dict[str, Any]] = []
+        self._memory_analysis: List[Dict[str, Any]] = []
+        self.jsonl_path = jsonl_path
 
     def record_snapshot(self, snapshot: Dict[str, Any]) -> None:
         """Persist a single snapshot document."""
         doc = dict(snapshot)
         doc.setdefault("_id", uuid.uuid4().hex)
+        doc.setdefault("record_type", "snapshot")
 
         if "captured_at" in doc and isinstance(doc["captured_at"], datetime):
             captured_at = doc["captured_at"]
@@ -44,8 +65,9 @@ class MarketImpactRepository:
         doc["captured_at"] = captured_at
 
         if self.collection is None:
-            self._memory.append(doc)
+            self._memory_snapshots.append(doc)
             logger.debug("Stored market impact snapshot in memory: %s", doc)
+            self._append_to_jsonl(doc)
             return
 
         try:
@@ -53,11 +75,59 @@ class MarketImpactRepository:
             logger.debug("Stored market impact snapshot in MongoDB: %s", doc["_id"])
         except Exception as exc:  # pragma: no cover - network/database issues
             logger.warning("Failed to persist market impact snapshot to MongoDB: %s", exc)
-            self._memory.append(doc)
+            self._memory_snapshots.append(doc)
+        finally:
+            self._append_to_jsonl(doc)
 
     def memory_snapshots(self) -> List[Dict[str, Any]]:
         """Expose in-memory snapshots (primarily for testing)."""
-        return list(self._memory)
+        return list(self._memory_snapshots)
+
+    def record_analysis_report(self, report: Dict[str, Any]) -> None:
+        """Persist the final analysis for an event."""
+        doc = dict(report)
+        doc.setdefault("_id", uuid.uuid4().hex)
+        doc.setdefault("record_type", "analysis")
+        if "generated_at" not in doc or not isinstance(doc["generated_at"], datetime):
+            doc["generated_at"] = datetime.now(UTC)
+
+        target_collection = self.analysis_collection
+        if target_collection is None:
+            self._memory_analysis.append(doc)
+            logger.debug("Stored market impact analysis in memory: %s", doc)
+            self._append_to_jsonl(doc)
+            return
+
+        try:
+            target_collection.insert_one(doc)
+            logger.debug("Stored market impact analysis in MongoDB: %s", doc["_id"])
+        except Exception as exc:  # pragma: no cover - network/database issues
+            logger.warning("Failed to persist market impact analysis to MongoDB: %s", exc)
+            self._memory_analysis.append(doc)
+        finally:
+            self._append_to_jsonl(doc)
+
+    def memory_analysis_reports(self) -> List[Dict[str, Any]]:
+        """Expose stored analysis documents (testing + local usage)."""
+        return list(self._memory_analysis)
+
+    def _append_to_jsonl(self, doc: Dict[str, Any]) -> None:
+        """Store the record in JSONL format for offline analysis."""
+        if not self.jsonl_path:
+            return
+
+        try:
+            os.makedirs(os.path.dirname(self.jsonl_path), exist_ok=True)
+            with open(self.jsonl_path, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps(doc, default=self._serialize, ensure_ascii=False) + "\n")
+        except Exception as exc:  # pragma: no cover - file-system issues
+            logger.warning("Failed to append market impact record to %s: %s", self.jsonl_path, exc)
+
+    @staticmethod
+    def _serialize(value: Any) -> Any:
+        if isinstance(value, datetime):
+            return value.isoformat()
+        return value
 
 
 @dataclass
@@ -99,6 +169,9 @@ class MarketImpactTracker:
         crypto_symbols: Optional[List[str]] = None,
         index_symbols: Optional[List[str]] = None,
         now_fn: Optional[Callable[[], datetime]] = None,
+        analysis_engine: Optional[ImpactAnalysisEngine] = None,
+        analysis_consumer: Optional[Callable[[Dict[str, Any]], None]] = None,
+        failure_notifier: Optional[Any] = None,
     ) -> None:
         self.repository = repository
         self.crypto_provider = crypto_provider
@@ -109,6 +182,10 @@ class MarketImpactTracker:
         self._now = now_fn or (lambda: datetime.now(UTC))
         self._tasks: List[TrackingTask] = []
         self._scheduled_events: set[str] = set()
+        self.analysis_engine = analysis_engine or ImpactAnalysisEngine()
+        self.analysis_consumer = analysis_consumer
+        self._event_snapshots: Dict[str, List[Dict[str, Any]]] = {}
+        self.failure_notifier = failure_notifier
 
     def handle_analysis_event(
         self,
@@ -186,6 +263,7 @@ class MarketImpactTracker:
 
         self._tasks.append(task)
         self._scheduled_events.add(event_id)
+        self._event_snapshots[event_id] = []
         logger.info(
             "Scheduled market impact tracking for %s (urgency: %s, interval: %ss, until: %s)",
             event_id,
@@ -222,6 +300,7 @@ class MarketImpactTracker:
                     task.event_id,
                     task.run_count,
                 )
+                self._finalize_task(task, completion_time=current_time)
 
         self._tasks = active_tasks
 
@@ -245,6 +324,15 @@ class MarketImpactTracker:
             except PriceProviderError as exc:
                 snapshot["crypto_error"] = str(exc)
                 logger.warning("Crypto provider failed for %s: %s", task.event_id, exc)
+                self._send_failure_alert(
+                    title="Market Impact Snapshot fehlgeschlagen",
+                    description=f"Crypto provider error for event {task.event_id}",
+                    details={
+                        "event_id": task.event_id,
+                        "provider": "crypto",
+                        "error": str(exc),
+                    },
+                )
 
         if self.index_provider and task.index_symbols:
             try:
@@ -252,14 +340,80 @@ class MarketImpactTracker:
             except PriceProviderError as exc:
                 snapshot["index_error"] = str(exc)
                 logger.warning("Index provider failed for %s: %s", task.event_id, exc)
+                self._send_failure_alert(
+                    title="Market Impact Snapshot fehlgeschlagen",
+                    description=f"Index provider error for event {task.event_id}",
+                    details={
+                        "event_id": task.event_id,
+                        "provider": "indices",
+                        "error": str(exc),
+                    },
+                )
 
         self.repository.record_snapshot(snapshot)
+        self._event_snapshots.setdefault(task.event_id, []).append(snapshot)
+
+    def _finalize_task(self, task: TrackingTask, *, completion_time: datetime) -> None:
+        """Finalize tracking for an event and run the impact analysis."""
+        snapshots = self._event_snapshots.pop(task.event_id, [])
+        if not snapshots:
+            self._scheduled_events.discard(task.event_id)
+            return
+
+        try:
+            analysis = self.analysis_engine.analyze_event(
+                event_id=task.event_id,
+                snapshots=snapshots,
+                metadata=task.metadata,
+            )
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.exception("Impact analysis failed for %s: %s", task.event_id, exc)
+            self._send_failure_alert(
+                title="Impact-Analyse fehlgeschlagen",
+                description=f"Impact analysis crashed for event {task.event_id}",
+                details={
+                    "event_id": task.event_id,
+                    "error": str(exc),
+                },
+            )
+            self._scheduled_events.discard(task.event_id)
+            return
+
+        analysis.setdefault("metadata", {})
+        analysis["metadata"].update(task.metadata)
+        analysis["urgency"] = task.urgency
+        analysis["completed_at"] = completion_time
+        analysis["runs"] = task.run_count
+
+        self.repository.record_analysis_report(analysis)
+
+        if self.analysis_consumer:
+            try:
+                self.analysis_consumer(analysis)
+            except Exception as exc:  # pragma: no cover - downstream handlers
+                logger.warning("Impact analysis consumer failed for %s: %s", task.event_id, exc)
+                self._send_failure_alert(
+                    title="Impact-Analyse Consumer fehlgeschlagen",
+                    description=f"Impact analysis consumer raised for event {task.event_id}",
+                    details={
+                        "event_id": task.event_id,
+                        "error": str(exc),
+                    },
+                )
+
+        self._scheduled_events.discard(task.event_id)
+
+    def _send_failure_alert(self, title: str, description: str, details: Optional[Dict[str, Any]] = None) -> None:
+        if not self.failure_notifier:
+            return
+        try:
+            self.failure_notifier.send_failure_alert(title, description, details=details)
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.warning("Failure notifier errored while reporting '%s': %s", title, exc)
 
 
 class CoinGeckoCryptoProvider:
     """Fetch cryptocurrency spot prices from CoinGecko."""
-
-    API_URL = "https://api.coingecko.com/api/v3/simple/price"
 
     def __init__(
         self,
@@ -268,11 +422,22 @@ class CoinGeckoCryptoProvider:
         vs_currency: str = "usd",
         session: Optional[requests.Session] = None,
         timeout_seconds: int = 10,
+        rate_limiter: Optional[RateLimiter] = None,
     ) -> None:
         self.id_map = {k.lower(): v for k, v in (id_map or {}).items()}
         self.vs_currency = vs_currency
-        self.session = session or requests.Session()
-        self.timeout_seconds = timeout_seconds
+        self.rate_limiter = rate_limiter or RateLimiter(min_interval_seconds=2.0)
+
+        if CoinGeckoAPI is None:
+            raise RuntimeError(
+                "pycoingecko is required to use CoinGeckoCryptoProvider. "
+                "Install with 'pip install pycoingecko'."
+            )
+
+        # Retain optional parameters for future extension; pycoingecko does not accept them directly.
+        self._session = session
+        self._timeout_seconds = timeout_seconds
+        self.client = CoinGeckoAPI()
 
     def fetch_prices(self, symbols: List[str]) -> Dict[str, Dict[str, Any]]:
         ids: List[str] = []
@@ -291,32 +456,23 @@ class CoinGeckoCryptoProvider:
         if not ids:
             return {}
 
-        params = {
-            "ids": ",".join(ids),
-            "vs_currencies": self.vs_currency,
-            "include_last_updated_at": "true",
-        }
-
         try:
-            response = self.session.get(
-                self.API_URL,
-                params=params,
-                timeout=self.timeout_seconds,
+            self.rate_limiter.wait()
+            payload = self.client.get_price(
+                ids=ids,
+                vs_currencies=self.vs_currency,
+                include_last_updated_at=True,
             )
-            response.raise_for_status()
-            payload = response.json()
-        except requests.RequestException as exc:  # pragma: no cover - network failures
+        except Exception as exc:  # pragma: no cover - dependency/network failures
             raise PriceProviderError(f"CoinGecko request failed: {exc}") from exc
-        except ValueError as exc:  # pragma: no cover - JSON decode errors
-            raise PriceProviderError(f"CoinGecko returned invalid JSON: {exc}") from exc
 
         results: Dict[str, Dict[str, Any]] = {}
-        for asset_id, data in payload.items():
+        for asset_id, data in (payload or {}).items():
             symbol = alias_map.get(asset_id)
             if not symbol:
                 continue
 
-            price = data.get(self.vs_currency)
+            price = (data or {}).get(self.vs_currency)
             results[symbol] = {
                 "price": price,
                 "currency": self.vs_currency,

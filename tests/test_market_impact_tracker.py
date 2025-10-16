@@ -1,10 +1,12 @@
 from datetime import datetime, timedelta, UTC
+from typing import Dict, List
 
 import pytest
 
 from src.services.market_impact_tracker import (
     MarketImpactRepository,
     MarketImpactTracker,
+    PriceProviderError,
 )
 
 
@@ -35,9 +37,52 @@ class FakeProvider:
             for symbol in symbols
         }
 
+class SequenceProvider:
+    def __init__(self, prices: List[float]) -> None:
+        self.prices = prices
+        self.index = 0
+        self.calls: List[List[str]] = []
+
+    def fetch_prices(self, symbols):
+        price = self.prices[self.index] if self.index < len(self.prices) else self.prices[-1]
+        self.index += 1
+        self.calls.append(list(symbols))
+        return {
+            symbol: {
+                "price": price,
+                "currency": "usd",
+                "provider": "sequence",
+            }
+            for symbol in symbols
+        }
+
+
+class FailingProvider:
+    def __init__(self, error: Exception | None = None) -> None:
+        self.error = error or PriceProviderError("boom")
+        self.calls = 0
+
+    def fetch_prices(self, symbols):
+        self.calls += 1
+        raise self.error
+
+
+class FailureNotifierStub:
+    def __init__(self) -> None:
+        self.alerts: List[Dict[str, object]] = []
+
+    def send_failure_alert(self, title: str, description: str, details=None) -> None:
+        self.alerts.append(
+            {
+                "title": title,
+                "description": description,
+                "details": details,
+            }
+        )
+
 
 def make_tracker(time_stub: TimeStub, **overrides):
-    repository = overrides.get("repository", MarketImpactRepository())
+    repository = overrides.get("repository", MarketImpactRepository(jsonl_path=None))
     crypto_provider = overrides.get("crypto_provider", FakeProvider())
 
     tracker = MarketImpactTracker(
@@ -48,6 +93,7 @@ def make_tracker(time_stub: TimeStub, **overrides):
         crypto_symbols=overrides.get("crypto_symbols", ["btc", "eth"]),
         index_symbols=overrides.get("index_symbols", []),
         now_fn=time_stub.now,
+        failure_notifier=overrides.get("failure_notifier"),
     )
     return tracker, repository, crypto_provider
 
@@ -176,3 +222,74 @@ def test_multiple_events_track_independently():
     # Providers wurden bei jedem Lauf für BTC aufgerufen
     assert len(provider.calls) == 5
     assert all(call == ["btc"] for call in provider.calls)
+
+
+def test_analysis_generated_after_completion(monkeypatch):
+    start = datetime(2025, 1, 1, tzinfo=UTC)
+    time_stub = TimeStub(start)
+    provider = SequenceProvider([100.0, 101.5, 99.4, 102.0])
+    tracker, repo, _ = make_tracker(
+        time_stub,
+        crypto_symbols=["btc"],
+        crypto_provider=provider,
+    )
+
+    monkeypatch.setattr(
+        MarketImpactTracker,
+        "URGENCY_PROFILES",
+        {
+            "immediate": {"interval_seconds": 60, "duration_seconds": 180},
+            "hours": MarketImpactTracker.URGENCY_PROFILES["hours"],
+        },
+    )
+
+    tracker.schedule_event_tracking(event_id="event-impact", urgency="immediate")
+
+    for _ in range(3):
+        time_stub.advance(60)
+        tracker.run_pending()
+
+    time_stub.advance(60)  # advance beyond end window
+    tracker.run_pending()
+
+    reports = repo.memory_analysis_reports()
+    assert len(reports) == 1
+    analysis = reports[0]
+
+    assert analysis["event_id"] == "event-impact"
+    assert analysis["urgency"] == "immediate"
+    assert analysis["runs"] >= 1
+
+    crypto_stats = analysis["assets"]["crypto"]
+    assert "btc" in crypto_stats
+    btc = crypto_stats["btc"]
+    assert pytest.approx(btc["change"]["percent"], rel=1e-5) == pytest.approx(2.0, rel=1e-5)
+    assert pytest.approx(btc["high"]["price"], rel=1e-5) == pytest.approx(102.0, rel=1e-5)
+    assert pytest.approx(btc["low"]["price"], rel=1e-5) == pytest.approx(99.4, rel=1e-5)
+    assert isinstance(analysis["report"], str)
+
+
+def test_failure_notifier_called_when_provider_fails():
+    time_stub = TimeStub(datetime(2025, 1, 1, tzinfo=UTC))
+    notifier = FailureNotifierStub()
+    failing_provider = FailingProvider()
+
+    tracker, repo, _ = make_tracker(
+        time_stub,
+        crypto_provider=failing_provider,
+        crypto_symbols=["btc"],
+        failure_notifier=notifier,
+    )
+
+    scheduled = tracker.schedule_event_tracking(event_id="event-fail", urgency="immediate")
+    assert scheduled is True
+
+    # Snapshot recorded with error
+    snapshot = repo.memory_snapshots()[0]
+    assert snapshot["crypto_error"]
+
+    # Failure alert dispatched
+    assert notifier.alerts, "Expected failure notifier to receive alert"
+    alert = notifier.alerts[0]
+    assert alert["title"] == "Market Impact Snapshot fehlgeschlagen"
+    assert alert["details"]["event_id"] == "event-fail"

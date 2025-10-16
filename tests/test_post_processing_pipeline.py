@@ -134,3 +134,42 @@ def test_failure_notifier_gets_called_on_exception():
     ctx.pipeline.process_posts([post], mongo_collection=MagicMock())
 
     failure_notifier.send_failure_alert.assert_called_once()
+
+
+def test_quality_auto_fix_removes_internal_scoring_reference():
+    ctx = make_pipeline()
+
+    market_analysis = {
+        "impact_level": "🟠 HIGH",
+        "impact_score": 30,
+        "alert_emoji": "🟠",
+        "details": {},
+        "summary": "High impact"
+    }
+    ctx.market_analyzer.analyze.return_value = market_analysis
+
+    reasoning = "This falls into the 75-89 range because it mentions numbers. Markets may still react."
+    llm_result = {
+        "score": 60,
+        "urgency": "days",
+        "reasoning": reasoning,
+        "processing_time_seconds": 1.0,
+    }
+    ctx.llm_analyzer.analyze.return_value = llm_result
+    ctx.llm_analyzer.quality_check_analysis.return_value = {
+        "approved": False,
+        "quality_score": 70,
+        "issues_found": ["Presence of internal scoring reference"],
+        "suggested_fixes": {"reasoning": None, "urgency": None, "score": None},
+    }
+    ctx.llm_analyzer.save_training_data = MagicMock()
+
+    ctx.pipeline.process_posts([sample_post()], mongo_collection=MagicMock())
+
+    updated_reasoning = ctx.llm_analyzer.analyze.return_value["reasoning"]
+    assert "75-89" not in updated_reasoning
+    review_meta = ctx.llm_analyzer.analyze.return_value.get("quality_review", {})
+    assert review_meta.get("approved") is True
+    assert review_meta.get("issues_found") == []
+    assert "removed_internal_scoring_reference" in review_meta.get("auto_fixes", [])
+    ctx.failure_notifier.send_failure_alert.assert_not_called()

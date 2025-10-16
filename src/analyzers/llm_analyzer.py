@@ -68,6 +68,8 @@ class LLMAnalyzer:
 
         self.error_webhook_url = getattr(self.config, "LLM_ERROR_WEBHOOK_URL", None)
         self._last_raw_response: Optional[str] = None
+        self._last_provider_error: Optional[str] = None
+        self._last_failure_message: Optional[str] = None
 
         # Verify primary connection
         self._verify_connection()
@@ -134,6 +136,7 @@ class LLMAnalyzer:
         Returns:
             Tuple of (response_text, provider_used)
         """
+        self._last_provider_error = None
         if self.use_openrouter:
             try:
                 response_text = self._invoke_openrouter(
@@ -144,8 +147,48 @@ class LLMAnalyzer:
                     max_output_tokens=(openrouter_settings or {}).get("max_output_tokens"),
                 )
                 return response_text, "openrouter"
+            except requests.exceptions.HTTPError as exc:
+                detail = ""
+                status = getattr(exc.response, "status_code", None)
+                if exc.response is not None:
+                    try:
+                        detail = exc.response.json()
+                    except ValueError:
+                        detail = exc.response.text
+                logger.error(
+                    "❌ OpenRouter %s request failed: %s%s",
+                    context,
+                    exc,
+                    f" - {detail}" if detail else ""
+                )
+                error_msg = f"OpenRouter {context} failed: {exc}"
+                if detail:
+                    error_msg = f"{error_msg} ({detail})"
+                self._last_provider_error = error_msg
+
+                # Some OpenRouter models reject JSON response format.
+                if (
+                    status == 400
+                    and response_format
+                    and detail
+                    and "response_format" in str(detail).lower()
+                ):
+                    logger.info("ℹ️  Retrying OpenRouter without enforced JSON mode")
+                    response_text = self._invoke_openrouter(
+                        prompt,
+                        response_format=None,
+                        temperature=(openrouter_settings or {}).get("temperature"),
+                        top_p=(openrouter_settings or {}).get("top_p"),
+                        max_output_tokens=(openrouter_settings or {}).get("max_output_tokens"),
+                    )
+                    return response_text, "openrouter"
+
+                if not self.ollama_url:
+                    raise
+                logger.info(f"⚠️  Falling back to Ollama for {context}")
             except Exception as exc:
                 logger.error(f"❌ OpenRouter {context} request failed: {exc}")
+                self._last_provider_error = f"OpenRouter {context} failed: {exc}"
                 if not self.ollama_url:
                     raise
                 logger.info(f"⚠️  Falling back to Ollama for {context}")
@@ -277,6 +320,8 @@ class LLMAnalyzer:
         """
         if not post_text or not post_text.strip():
             return None
+        self._last_provider_error = None
+        self._last_failure_message = None
         
         # Build the analysis prompt using template
         prompt = build_market_analysis_prompt(post_text)
@@ -364,6 +409,8 @@ class LLMAnalyzer:
                             f"✅ LLM Analysis complete via {provider_label} in {processing_time:.2f}s - "
                             f"Score: {analysis.get('score', 'N/A')}"
                         )
+                    if self._last_provider_error:
+                        analysis['provider_error'] = self._last_provider_error
                     return analysis
                 else:
                     logger.warning(f"⚠️  Could not parse JSON from response (attempt {attempt + 1}/{max_retries})")
@@ -378,6 +425,7 @@ class LLMAnalyzer:
             except requests.exceptions.RequestException as e:
                 logger.error(f"❌ LLM request failed (attempt {attempt + 1}/{max_retries}): {e}")
                 last_error = f"Request failed: {e}"
+                self._last_provider_error = str(e)
                 # Continue to retry
             except Exception as e:
                 logger.error(f"❌ Unexpected error in LLM analysis (attempt {attempt + 1}/{max_retries}): {e}")
@@ -386,12 +434,23 @@ class LLMAnalyzer:
         
         # All retries exhausted
         logger.error(f"❌ LLM analysis failed after {max_retries} attempts. Last error: {last_error}")
+        self._last_failure_message = last_error
         self._notify_failure(
             post_text=post_text,
             keyword_score=keyword_score,
             error_message=last_error,
         )
         return None
+    
+    def pop_last_provider_error(self) -> Optional[str]:
+        """Return and clear the last provider-level error, if any."""
+        error = self._last_provider_error
+        self._last_provider_error = None
+        return error
+
+    @property
+    def last_failure_message(self) -> Optional[str]:
+        return self._last_failure_message
     
     def quality_check_analysis(self, post_text: str, analysis: Dict) -> Optional[Dict]:
         """
@@ -716,9 +775,16 @@ class LLMAnalyzer:
         except Exception as exc:
             logger.error(f"❌ Failed to send LLM failure alert: {exc}")
     
-    def save_training_data(self, post_text: str, keyword_score: int, 
-                          llm_analysis: Dict, output_dir: str = "training_data",
-                          quality_check: Optional[Dict] = None):
+    def save_training_data(
+        self,
+        post_text: str,
+        keyword_score: int,
+        llm_analysis: Dict,
+        *,
+        post_id: Optional[str] = None,
+        output_dir: str = "training_data",
+        quality_check: Optional[Dict] = None,
+    ):
         """
         Save analysis to training data for future spaCy NER training
         
@@ -726,6 +792,7 @@ class LLMAnalyzer:
             post_text: Original post text
             keyword_score: Keyword-based score
             llm_analysis: LLM analysis results
+            post_id: Identifier of the originating post/event
             output_dir: Directory to save training data
             quality_check: Optional quality check results
         """
@@ -735,6 +802,7 @@ class LLMAnalyzer:
         
         training_entry = {
             'timestamp': datetime.now(UTC).isoformat(),
+            'post_id': post_id,
             'post_text': post_text,
             'keyword_score': keyword_score,
             'llm_score': llm_analysis.get('score', 0),

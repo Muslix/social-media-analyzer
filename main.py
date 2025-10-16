@@ -533,6 +533,7 @@ def main():
             enabled=True,
             crypto_symbols=crypto_symbols,
             index_symbols=index_symbols,
+            failure_notifier=discord_failure_notifier,
         )
         logger.info(
             "Market impact tracker enabled (crypto assets: %s, indices: %s)",

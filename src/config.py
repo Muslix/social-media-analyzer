@@ -124,7 +124,7 @@ class ConfigValidationError(Exception):
     pass
 
 class Config(object):
-    LOG_FORMAT = os.getenv("LOG_FORMAT") or '%(asctime)s - %(levelname)s - %(message)s \t - %(name)s (%(filename)s).%(funcName)s(%(lineno)d) '
+    LOG_FORMAT = os.getenv("LOG_FORMAT") or '%(asctime)s - %(levelname)s - %(message)s'
     LOG_LEVEL = os.getenv("LOG_LEVEL") or 'INFO'
     APPNAME = os.getenv("APPNAME") or 'Truth Social Monitor'
     ENV = os.getenv("ENV") or "DEV"

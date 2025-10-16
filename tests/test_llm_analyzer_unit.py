@@ -246,6 +246,7 @@ def test_save_training_data_writes_jsonl(tmp_path, llm):
             "model": "mock",
             "processing_time_seconds": 1.5,
         },
+        post_id="post-123",
         output_dir=str(output_dir),
         quality_check={"approved": True, "quality_score": 90},
     )
@@ -254,5 +255,6 @@ def test_save_training_data_writes_jsonl(tmp_path, llm):
     assert jsonl_path.exists()
     content = jsonl_path.read_text(encoding="utf-8").strip()
     record = json.loads(content)
+    assert record["post_id"] == "post-123"
     assert record["keyword_score"] == 40
     assert record["quality_check"]["approved"] is True

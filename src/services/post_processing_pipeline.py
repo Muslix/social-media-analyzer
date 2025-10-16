@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, UTC
 from typing import Any, Dict, List, Optional, Callable
 
@@ -101,18 +102,57 @@ class PostProcessingPipeline:
                 self.llm_threshold
             )
             llm_analysis = self.llm_analyzer.analyze(cleaned_content, market_analysis['impact_score'])
+            provider_error_message: Optional[str] = None
+            pop_error = getattr(self.llm_analyzer, "pop_last_provider_error", None)
+            if callable(pop_error):
+                try:
+                    candidate_error = pop_error()
+                    if isinstance(candidate_error, str):
+                        candidate_error = candidate_error.strip()
+                        if candidate_error:
+                            provider_error_message = candidate_error
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.debug("Failed to retrieve provider error: %s", exc)
 
             if llm_analysis:
+                if provider_error_message:
+                    self._notify_failure(
+                        title="Primärer LLM-Provider fehlgeschlagen",
+                        description=f"Fallback genutzt für Post {post['id']}",
+                        details={
+                            "post_id": post['id'],
+                            "provider": llm_analysis.get('provider'),
+                            "error": provider_error_message,
+                            "keyword_score": market_analysis['impact_score'],
+                        },
+                    )
                 logger.info(
                     "✅ LLM analysis complete - Score: %s, Urgency: %s",
                     llm_analysis.get('score'),
                     llm_analysis.get('urgency')
                 )
-                self._apply_quality_check(cleaned_content, llm_analysis, market_analysis)
+                self._apply_quality_check(
+                    cleaned_content,
+                    llm_analysis,
+                    market_analysis,
+                    post_id=post.get('id')
+                )
             else:
                 logger.warning(
                     "⚠️  LLM analysis failed for post %s - will NOT send Discord alert",
                     post['id']
+                )
+                error_message = getattr(self.llm_analyzer, "last_failure_message", None)
+                if not error_message:
+                    error_message = "Unbekannter LLM-Fehler"
+                self._notify_failure(
+                    title="LLM-Analyse fehlgeschlagen",
+                    description=f"LLM-Analyse für Post {post['id']} konnte nicht abgeschlossen werden",
+                    details={
+                        "post_id": post['id'],
+                        "error": error_message,
+                        "keyword_score": market_analysis['impact_score'],
+                    },
                 )
 
         created_at = self._normalize_created_at(post.get('created_at'))
@@ -221,7 +261,14 @@ class PostProcessingPipeline:
         except Exception as exc:  # pragma: no cover - defensive
             logger.error("Failed to send failure notification: %s", exc)
 
-    def _apply_quality_check(self, cleaned_content: str, llm_analysis: Dict[str, Any], market_analysis: Dict[str, Any]) -> None:
+    def _apply_quality_check(
+        self,
+        cleaned_content: str,
+        llm_analysis: Dict[str, Any],
+        market_analysis: Dict[str, Any],
+        *,
+        post_id: Optional[str] = None
+    ) -> None:
         original_reasoning = llm_analysis.get('reasoning')
         original_urgency = llm_analysis.get('urgency')
         original_score = llm_analysis.get('score')
@@ -280,12 +327,76 @@ class PostProcessingPipeline:
                         llm_analysis['score'] = original_score
                     review_meta['suggested_score_note'] = score_fix
 
+            self._apply_auto_quality_fixes(llm_analysis, qc_result, review_meta)
+
         self.llm_analyzer.save_training_data(
             cleaned_content,
             market_analysis['impact_score'],
             llm_analysis,
+            post_id=post_id,
             quality_check=qc_result
         )
+
+    @staticmethod
+    def _apply_auto_quality_fixes(
+        llm_analysis: Dict[str, Any],
+        qc_result: Dict[str, Any],
+        review_meta: Dict[str, Any]
+    ) -> None:
+        """Automatically resolve known quality issues like internal scoring references."""
+        issues = list(qc_result.get('issues_found') or [])
+        if not issues:
+            return
+
+        normalized_issues = [issue.lower() for issue in issues]
+        auto_fixes: List[str] = []
+
+        if any("internal scoring" in issue or "score range" in issue for issue in normalized_issues):
+            sanitized = PostProcessingPipeline._sanitize_internal_scoring_references(
+                llm_analysis.get('reasoning', '')
+            )
+            if sanitized and sanitized != llm_analysis.get('reasoning'):
+                logger.info("🛠️  Removed internal scoring references from reasoning")
+                llm_analysis['reasoning'] = sanitized
+                auto_fixes.append("removed_internal_scoring_reference")
+                issues = [
+                    issue
+                    for issue in issues
+                    if "internal scoring" not in issue.lower() and "score range" not in issue.lower()
+                ]
+
+        if not auto_fixes:
+            return
+
+        review_meta.setdefault('auto_fixes', [])
+        for fix in auto_fixes:
+            if fix not in review_meta['auto_fixes']:
+                review_meta['auto_fixes'].append(fix)
+
+        review_meta['issues_found'] = issues
+        qc_result['issues_found'] = issues
+
+        if not issues:
+            logger.info("✅ Auto fixes resolved all quality issues; marking as approved")
+            review_meta['approved'] = True
+            qc_result['approved'] = True
+
+    @staticmethod
+    def _sanitize_internal_scoring_references(reasoning: str) -> str:
+        """Remove sentences mentioning internal scoring ranges without losing core insight."""
+        if not reasoning:
+            return reasoning
+
+        pattern = re.compile(
+            r"(internal scoring|score range|\b\d{1,3}\s*[-–]\s*\d{1,3}\b\s*(?:range)?)",
+            re.IGNORECASE
+        )
+
+        sentences = re.split(r'(?<=[.!?])\s+', reasoning)
+        filtered_sentences = [sentence for sentence in sentences if not pattern.search(sentence)]
+
+        sanitized = " ".join(filtered_sentences).strip()
+        return sanitized or reasoning
 
     @staticmethod
     def _looks_like_final_reasoning(reasoning: str) -> bool:
